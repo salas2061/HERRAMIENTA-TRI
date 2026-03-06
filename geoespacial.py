@@ -96,6 +96,40 @@ def parse_percent_series(s):
         v = v * 100.0
     return v
 
+
+def parse_number_series(s):
+    """
+    Convierte strings tipo '3.406.481' o '-665.254' o '1,234.50' a número.
+    - Detecta '.' como miles (incluye 1 solo punto si es formato miles).
+    - Detecta ',' como decimal cuando corresponde.
+    """
+    if s is None:
+        return pd.Series([0.0])
+
+    ss = s.astype(str).str.strip()
+    ss = ss.str.replace(r"[^\d\-\.,]", "", regex=True)
+
+    has_dot = ss.str.contains(r"\.", regex=True)
+    has_comma = ss.str.contains(",", regex=False)
+
+    ss2 = ss.copy()
+
+    # Caso 1: formato miles con puntos (1 o más):  -665.254  /  3.406.481
+    mask_thousands_dot = (~has_comma) & ss2.str.match(r"^\-?\d{1,3}(\.\d{3})+$")
+    ss2.loc[mask_thousands_dot] = ss2.loc[mask_thousands_dot].str.replace(".", "", regex=False)
+
+    # Caso 2: ambos: '.' miles y ',' decimal
+    mask_both = has_dot & has_comma
+    ss2.loc[mask_both] = (
+        ss2.loc[mask_both].str.replace(".", "", regex=False).str.replace(",", ".", regex=False)
+    )
+
+    # Caso 3: solo ',' => decimal
+    mask_only_comma = (~mask_both) & (~has_dot) & has_comma
+    ss2.loc[mask_only_comma] = ss2.loc[mask_only_comma].str.replace(",", ".", regex=False)
+
+    return pd.to_numeric(ss2, errors="coerce").fillna(0.0)
+
 def norm_txt(s):
     """
     Normaliza texto para clasificación (quita tildes, uppercase, espacios).
@@ -471,8 +505,13 @@ COLA_LON  = find_col_ag(["LONGITUD", "LON"]) or "LONGITUD"
 COLA_DIV  = find_col_ag(["DIVISION", "DIVISIÓN"]) or "DIVISION"
 COLA_DIR  = find_col_ag(["DIRECCION", "DIRECCIÓN"]) or "DIRECCION"
 COLA_CAPA = find_col_ag(["CAPA"]) or "CAPA"
-COLA_TRX_OCT = find_col_ag(["TRXS OCTUBRE", "TRX OCTUBRE"]) or None
-COLA_TRX_NOV = find_col_ag(["TRXS NOV", "TRXS NOVIEMBRE"]) or None
+# ✅ Nuevos meses según tu Excel: TRXS DIC / TRXS ENE
+COLA_TRX_DIC = find_col_ag(["TRXS DIC", "TRXS DICIEMBRE", "TRX DIC", "TRX DICIEMBRE"]) or None
+COLA_TRX_ENE = find_col_ag(["TRXS ENE", "TRXS ENERO", "TRX ENE", "TRX ENERO"]) or None
+
+# ✅ Compatibilidad: NO rompes tu código actual (sigue usando trxs_oct / trxs_nov)
+COLA_TRX_OCT = COLA_TRX_DIC
+COLA_TRX_NOV = COLA_TRX_ENE
 PROMA_COL = find_col_ag(["PROMEDIO", "PROM"]) or None
 
 if PROMA_COL is None:
@@ -531,10 +570,18 @@ COLF_EAD = find_col_of(["ESTRUCTURA AD", "ESTRUCTURA_AD"]) or "ESTRUCTURA AD"
 COLF_CLI = find_col_of(["CLIENTES UNICOS", "CLIENTES ÚNICOS", "CLIENTES_UNICOS"]) or "CLIENTES UNICOS"
 COLF_TKT = find_col_of(["TOTAL_TICKETS", "TOTAL TICKETS"]) or "TOTAL_TICKETS"
 COLF_RED = find_col_of(["RED LINES", "REDLINES", "RED_LINES"]) or "RED LINES"
+COLF_DIR  = find_col_of(["DIRECCION", "DIRECCIÓN"]) or "DIRECCIÓN"
+COLF_PERF = find_col_of(["PERFORMANCE_2025", "PERFORMANCE 2025", "PERFOMANCE_2025", "PERFOMANCE 2025"]) or "PERFORMANCE_2025"
+COLF_BAI  = find_col_of(["BAI"]) or "BAI"
+COLF_MARG = find_col_of(["MARGEN NETO", "MARGEN_NETO"]) or "MARGEN NETO"
 
-for c in [COLF_EAS, COLF_EBP, COLF_EAD, COLF_CLI, COLF_TKT, COLF_RED]:
+for c in [COLF_EAS, COLF_EBP, COLF_EAD, COLF_CLI, COLF_TKT, COLF_RED, COLF_BAI, COLF_MARG]:
     if c not in raw_of.columns:
         raw_of[c] = 0
+
+for c in [COLF_DIR, COLF_PERF]:
+    if c not in raw_of.columns:
+        raw_of[c] = ""
 
 raw_of[COLF_LAT] = (
     raw_of[COLF_LAT].astype(str)
@@ -560,6 +607,31 @@ df_oficinas[COLF_EAD] = pd.to_numeric(df_oficinas[COLF_EAD], errors="coerce").fi
 df_oficinas[COLF_CLI] = pd.to_numeric(df_oficinas[COLF_CLI], errors="coerce").fillna(0.0)
 df_oficinas[COLF_TKT] = pd.to_numeric(df_oficinas[COLF_TKT], errors="coerce").fillna(0.0)
 df_oficinas[COLF_RED] = parse_percent_series(df_oficinas[COLF_RED])
+df_oficinas[COLF_DIR]  = df_oficinas[COLF_DIR].astype(str).fillna("").str.strip()
+df_oficinas[COLF_PERF] = df_oficinas[COLF_PERF].astype(str).fillna("").str.strip()
+df_oficinas[COLF_BAI]  = parse_number_series(df_oficinas[COLF_BAI])
+df_oficinas[COLF_MARG] = parse_number_series(df_oficinas[COLF_MARG])
+
+# ============================================================
+# LISTA DE OFICINAS PARA "UBICAR EN MAPA" (no filtra datos)
+# ============================================================
+OFICINAS_LOOKUP = []
+for _, r in df_oficinas.iterrows():
+    nombre = str(r.get(COLF_NAME, "")).strip()
+    if not nombre:
+        continue
+    OFICINAS_LOOKUP.append({
+        "nombre": nombre,
+        "lat": float(r.get(COLF_LAT, 0.0)),
+        "lon": float(r.get(COLF_LON, 0.0)),
+        "departamento": str(r.get(COLF_DEPT, "")).strip(),
+        "provincia": str(r.get(COLF_PROV, "")).strip(),
+        "distrito": str(r.get(COLF_DIST, "")).strip(),
+    })
+
+# orden alfabético por nombre
+OFICINAS_LOOKUP = sorted(OFICINAS_LOOKUP, key=lambda x: normalize_col(x["nombre"]))
+
 
 # ============================================================
 # 2D. CARGAR ZONAS (URBANA / RURAL) ✅ (ZONAS.xlsx)
@@ -815,6 +887,9 @@ for prov in provincias_unicas:
     dists = geo_all.loc[geo_all["provincia"] == prov, "distrito"].unique().tolist()
     DIST_BY_PROV[prov] = sorted([d for d in dists if d])
 
+ALL_PROVINCIAS = sorted([p for p in geo_all["provincia"].dropna().unique().tolist() if p])
+ALL_DISTRITOS  = sorted([d for d in geo_all["distrito"].dropna().unique().tolist() if d])
+
 # ============================================================
 # UNIFICACIÓN DE DIVISIONES (Islas + Oficinas + Agentes)
 # ============================================================
@@ -957,7 +1032,7 @@ def root():
         return "", 200
 
     if session.get("user") == APP_USER:
-        return redirect(url_for("selector"))
+        return redirect(url_for("mapa_integral"))
     return redirect(url_for("login"))
 
 @app.route("/login", methods=["GET", "POST"])
@@ -968,7 +1043,7 @@ def login():
         if u == APP_USER and p == APP_PASS:
             session.clear()
             session["user"] = u
-            return redirect(url_for("selector"))
+            return redirect(url_for("mapa_integral"))
         return render_template_string(LOGIN_TEMPLATE, error="Credenciales incorrectas")
     return render_template_string(LOGIN_TEMPLATE)
 
@@ -982,59 +1057,12 @@ def logout():
 # ============================================================
 # 5. SELECTOR DE CAPAS
 # ============================================================
-SELECTOR_TEMPLATE = """
-<!DOCTYPE html>
-<html>
-<head>
-  <meta charset="utf-8">
-  <title>Selector de Capas — BBVA</title>
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <style>
-    body{ margin:0; padding:40px 20px; font-family:Arial,Helvetica,sans-serif; background:#eef4fb; }
-    h1{ text-align:center; color:#072146; }
-    .grid{ margin-top:40px; display:flex; justify-content:center; gap:40px; flex-wrap:wrap; }
-    .card{
-      width:320px; height:260px; background:white; border-radius:20px;
-      box-shadow:0 8px 26px rgba(0,0,0,0.15);
-      cursor:pointer;
-      display:flex; flex-direction:column; align-items:center; justify-content:flex-start;
-      padding:16px 14px;
-      transition:transform .18s ease, box-shadow .18s ease;
-    }
-    .card:hover{ transform:translateY(-4px) scale(1.02); box-shadow:0 12px 32px rgba(0,0,0,0.25); }
-    .card img{ width:100%; height:170px; object-fit:cover; border-radius:14px; }
-    .card-title{ margin-top:12px; font-size:18px; font-weight:700; color:#072146; display:flex; align-items:center; gap:8px; }
-    .card-title span.icon{ font-size:22px; }
-  </style>
-</head>
-<body>
-  <h1>Seleccione la capa</h1>
-  <div class="grid">
-    <div class="card" onclick="location.href='/mapa/oficinas'">
-      <img src="{{ url_for('static', filename='oficina.png') }}" alt="Oficinas BBVA">
-      <div class="card-title"><span class="icon">🏦</span>Oficinas</div>
-    </div>
-    <div class="card" onclick="location.href='/mapa/islas'">
-      <img src="{{ url_for('static', filename='isla.png') }}" alt="Islas BBVA">
-      <div class="card-title"><span class="icon">🌐</span>ATMs</div>
-    </div>
-    <div class="card" onclick="location.href='/mapa/agentes'">
-      <img src="{{ url_for('static', filename='agente.png') }}" alt="Agentes BBVA">
-      <div class="card-title"><span class="icon">🧍</span>Agentes</div>
-    </div>
-    <div class="card" onclick="location.href='/mapa/integral'">
-      <img src="{{ url_for('static', filename='banco.png') }}" alt="Mapa Integral BBVA">
-      <div class="card-title"><span class="icon">🗺️</span>Integral</div>
-    </div>
-  </div>
-</body>
-</html>
-"""
+SELECTOR_TEMPLATE = None  # (removido: solo usamos /mapa/integral)
 
 @app.route("/selector")
 @login_required
 def selector():
-    return render_template_string(SELECTOR_TEMPLATE)
+    return redirect(url_for("mapa_integral"))
 
 @app.route("/api/recomendaciones")
 @login_required
@@ -1082,21 +1110,11 @@ def api_zonas():
 @app.route("/api/nodos")
 @login_required
 def api_nodos():
-    dpto = request.args.get("departamento", "").upper().strip()
-    prov = request.args.get("provincia", "").upper().strip()
-    dist = request.args.get("distrito", "").upper().strip()
-
+    # ✅ Ya NO se filtra por Departamento / Provincia / Distrito
     if df_nodos is None or df_nodos.empty:
         return jsonify({"total": 0, "resumen": {}, "nodos": []})
 
     dff = df_nodos.copy()
-    dff["DEPARTAMENTO"] = dff["DEPARTAMENTO"].astype(str).str.upper().str.strip()
-    dff["PROVINCIA"] = dff["PROVINCIA"].astype(str).str.upper().str.strip()
-    dff["DISTRITO"] = dff["DISTRITO"].astype(str).str.upper().str.strip()
-
-    if dpto: dff = dff[dff["DEPARTAMENTO"] == dpto]
-    if prov: dff = dff[dff["PROVINCIA"] == prov]
-    if dist: dff = dff[dff["DISTRITO"] == dist]
 
     resumen = {
         "total": 0,
@@ -1179,11 +1197,13 @@ def mapa_integral():
         departamentos=DEPARTAMENTOS,
         provincias_by_dept=PROVINCIAS_BY_DEPT,
         dist_by_prov=DIST_BY_PROV,
+        all_provincias=ALL_PROVINCIAS,
+        all_distritos=ALL_DISTRITOS,
         div_by_dept=DIVISIONES_BY_DEPT,
         div_by_prov=DIVISIONES_BY_PROV,
         div_by_dist=DIVISIONES_BY_DIST,
         divisiones=DIVISIONES,
-        segment_list=SEGMENTOS_CLIENTES,
+        oficinas_lookup=OFICINAS_LOOKUP,
         initial_center=initial_center,
         initial_zoom=6,
     )
@@ -1191,23 +1211,8 @@ def mapa_integral():
 @app.route("/mapa/<tipo>")
 @login_required
 def mapa_tipo(tipo):
-    if tipo not in ["oficinas", "islas", "agentes"]:
-        return "No existe esa capa", 404
-    initial_center = df[[COL_LAT, COL_LON]].mean().tolist()
-    return render_template_string(
-        TEMPLATE_MAPA,
-        tipo_mapa=tipo,
-        departamentos=DEPARTAMENTOS,
-        provincias_by_dept=PROVINCIAS_BY_DEPT,
-        dist_by_prov=DIST_BY_PROV,
-        div_by_dept=DIVISIONES_BY_DEPT,
-        div_by_prov=DIVISIONES_BY_PROV,
-        div_by_dist=DIVISIONES_BY_DIST,
-        divisiones=DIVISIONES,
-        segment_list=SEGMENTOS_CLIENTES,
-        initial_center=initial_center,
-        initial_zoom=6,
-    )
+    # Vista simplificada: todas las rutas /mapa/* van a INTEGRAL
+    return redirect(url_for("mapa_integral"))
 
 # ============================================================
 # 7. API /api/points — ISLAS + AGENTES + OFICINAS
@@ -1215,237 +1220,9 @@ def mapa_tipo(tipo):
 @app.route("/api/points")
 @login_required
 def api_points():
-    tipo_mapa = request.args.get("tipo", "").lower()
-    dpto = request.args.get("departamento", "").upper().strip()
-    prov = request.args.get("provincia", "").upper().strip()
-    dist = request.args.get("distrito", "").upper().strip()
-    divi = request.args.get("division", "").upper().strip()
-    tipo_atm = request.args.get("tipo_atm", "").upper().strip()
-    ubic_atm = request.args.get("ubic_atm", "").upper().strip()
+    # Endpoint legacy (capas individuales). Se deja inhabilitado en la versión solo-INTEGRAL.
+    return jsonify({"error": "Endpoint deshabilitado. Usa /api/points_integral"}), 410
 
-    # ---------------------- CAPA ISLAS (ATMs) ----------------------
-    if tipo_mapa == "islas":
-        dff = df.copy()
-        dff[COL_DEPT] = dff[COL_DEPT].astype(str).str.upper().str.strip()
-        dff[COL_PROV] = dff[COL_PROV].astype(str).str.upper().str.strip()
-        dff[COL_DIST] = dff[COL_DIST].astype(str).str.upper().str.strip()
-        dff[COL_DIV] = dff[COL_DIV].astype(str).str.upper().str.strip()
-        dff[COL_UBIC] = dff[COL_UBIC].astype(str).str.upper().str.strip()
-        dff[COL_TIPO] = dff[COL_TIPO].astype(str).str.upper().str.strip()
-
-        if dpto: dff = dff[dff[COL_DEPT] == dpto]
-        if prov: dff = dff[dff[COL_PROV] == prov]
-        if dist: dff = dff[dff[COL_DIST] == dist]
-        if divi: dff = dff[dff[COL_DIV] == divi]
-        if tipo_atm: dff = dff[dff[COL_TIPO].str.contains(tipo_atm, na=False)]
-        if ubic_atm: dff = dff[dff[COL_UBIC].str.contains(ubic_atm, na=False)]
-
-        total_atms = int(len(dff))
-        suma_total = float(dff[PROM_COL].sum()) if total_atms > 0 else 0.0
-
-        total_oficinas = int(dff[COL_UBIC].str.contains("OFICINA", na=False).sum())
-        total_islas = int(dff[COL_UBIC].str.contains("ISLA", na=False).sum())
-        total_disp = int(dff[COL_TIPO].str.contains("DISPENSADOR", na=False).sum())
-        total_mon = int(dff[COL_TIPO].str.contains("MONEDERO", na=False).sum())
-        total_rec = int(dff[COL_TIPO].str.contains("RECICLADOR", na=False).sum())
-
-        puntos = []
-        for _, r in dff.iterrows():
-            nombre = ""
-            if COL_NAME and COL_NAME in r.index:
-                nombre = str(r.get(COL_NAME, "")).strip()
-            if not nombre:
-                nombre = str(r.get(COL_ATM, ""))
-
-            lat_v = float(r[COL_LAT])
-            lon_v = float(r[COL_LON])
-            puntos.append({
-                "lat": lat_v,
-                "lon": lon_v,
-                "atm": str(r.get(COL_ATM, "")),
-                "nombre": nombre,
-                "promedio": float(r.get(PROM_COL, 0.0)),
-                "division": str(r.get(COL_DIV, "")),
-                "tipo": str(r.get(COL_TIPO, "")),
-                "ubicacion": str(r.get(COL_UBIC, "")),
-                "departamento": str(r.get(COL_DEPT, "")),
-                "provincia": str(r.get(COL_PROV, "")),
-                "distrito": str(r.get(COL_DIST, "")),
-                "direccion": get_address(lat_v, lon_v),
-                "capa": "",
-            })
-
-        return jsonify({
-            "puntos": puntos,
-            "total_atms": total_atms,
-            "total_oficinas": total_oficinas,
-            "total_islas": total_islas,
-            "total_disp": total_disp,
-            "total_mon": total_mon,
-            "total_rec": total_rec,
-            "suma_total": suma_total,
-            "total_agentes": 0,
-            "total_capa_A1": 0,
-            "total_capa_A2": 0,
-            "total_capa_A3": 0,
-            "total_capa_B": 0,
-            "total_capa_C": 0,
-        })
-
-    # ---------------------- CAPA AGENTES ----------------------
-    if tipo_mapa == "agentes":
-        dff = df_agentes.copy()
-        dff[COLA_DEPT] = dff[COLA_DEPT].astype(str).str.upper().str.strip()
-        dff[COLA_PROV] = dff[COLA_PROV].astype(str).str.upper().str.strip()
-        dff[COLA_DIST] = dff[COLA_DIST].astype(str).str.upper().str.strip()
-        dff[COLA_DIV] = dff[COLA_DIV].astype(str).str.upper().str.strip()
-        dff[COLA_CAPA] = dff[COLA_CAPA].astype(str).str.upper().str.strip()
-
-        if dpto: dff = dff[dff[COLA_DEPT] == dpto]
-        if prov: dff = dff[dff[COLA_PROV] == prov]
-        if dist: dff = dff[dff[COLA_DIST] == dist]
-        if divi: dff = dff[dff[COLA_DIV] == divi]
-
-        total_agentes = int(len(dff))
-        suma_total = float(dff[PROMA_COL].sum()) if total_agentes > 0 else 0.0
-
-        capa_series = dff[COLA_CAPA].str.upper().fillna("")
-        total_capa_A1 = int((capa_series == "A1").sum())
-        total_capa_A2 = int((capa_series == "A2").sum())
-        total_capa_A3 = int((capa_series == "A3").sum())
-        total_capa_B = int((capa_series == "B").sum())
-        total_capa_C = int((capa_series == "C").sum())
-
-        puntos = []
-        for _, r in dff.iterrows():
-            lat_v = float(r[COLA_LAT])
-            lon_v = float(r[COLA_LON])
-            puntos.append({
-                "lat": lat_v,
-                "lon": lon_v,
-                "atm": str(r.get(COLA_ID, "")),
-                "nombre": str(r.get(COLA_COM, "")),
-                "promedio": float(r.get(PROMA_COL, 0.0)),
-                "division": str(r.get(COLA_DIV, "")),
-                "tipo": "AGENTE",
-                "ubicacion": "AGENTE",
-                "departamento": str(r.get(COLA_DEPT, "")),
-                "provincia": str(r.get(COLA_PROV, "")),
-                "distrito": str(r.get(COLA_DIST, "")),
-                "direccion": str(r.get(COLA_DIR, "")),
-                "capa": str(r.get(COLA_CAPA, "")),
-                "trxs_oct": float(r.get(COLA_TRX_OCT, 0.0)) if COLA_TRX_OCT else 0.0,
-                "trxs_nov": float(r.get(COLA_TRX_NOV, 0.0)) if COLA_TRX_NOV else 0.0,
-            })
-
-        return jsonify({
-            "puntos": puntos,
-            "total_atms": total_agentes,
-            "total_oficinas": 0,
-            "total_islas": 0,
-            "total_disp": 0,
-            "total_mon": 0,
-            "total_rec": 0,
-            "suma_total": suma_total,
-            "total_agentes": total_agentes,
-            "total_capa_A1": total_capa_A1,
-            "total_capa_A2": total_capa_A2,
-            "total_capa_A3": total_capa_A3,
-            "total_capa_B": total_capa_B,
-            "total_capa_C": total_capa_C,
-        })
-
-    # ---------------------- CAPA OFICINAS ----------------------
-    if tipo_mapa == "oficinas":
-        dff = df_oficinas.copy()
-        dff[COLF_DEPT] = dff[COLF_DEPT].astype(str).str.upper().str.strip()
-        dff[COLF_PROV] = dff[COLF_PROV].astype(str).str.upper().str.strip()
-        dff[COLF_DIST] = dff[COLF_DIST].astype(str).str.upper().str.strip()
-        dff[COLF_DIV] = dff[COLF_DIV].astype(str).str.upper().str.strip()
-
-        if dpto: dff = dff[dff[COLF_DEPT] == dpto]
-        if prov: dff = dff[dff[COLF_PROV] == prov]
-        if dist: dff = dff[dff[COLF_DIST] == dist]
-        if divi: dff = dff[dff[COLF_DIV] == divi]
-
-        total_oficinas = int(len(dff))
-        suma_total = float(dff[COLF_TRX].sum()) if total_oficinas > 0 else 0.0
-
-        prom_eas = float(dff[COLF_EAS].mean()) if total_oficinas > 0 else 0.0
-        prom_ebp = float(dff[COLF_EBP].mean()) if total_oficinas > 0 else 0.0
-        prom_ead = float(dff[COLF_EAD].mean()) if total_oficinas > 0 else 0.0
-        prom_cli = float(dff[COLF_CLI].mean()) if total_oficinas > 0 else 0.0
-        prom_tkt = float(dff[COLF_TKT].mean()) if total_oficinas > 0 else 0.0
-        prom_red = float(dff[COLF_RED].mean()) if total_oficinas > 0 else 0.0
-
-        puntos = []
-        for _, r in dff.iterrows():
-            puntos.append({
-                "lat": float(r[COLF_LAT]),
-                "lon": float(r[COLF_LON]),
-                "atm": str(r.get(COLF_ID, "")),
-                "nombre": str(r.get(COLF_NAME, "")),
-                "promedio": float(r.get(COLF_TRX, 0.0)),
-                "division": str(r.get(COLF_DIV, "")),
-                "tipo": "OFICINA",
-                "ubicacion": "OFICINA",
-                "departamento": str(r.get(COLF_DEPT, "")),
-                "provincia": str(r.get(COLF_PROV, "")),
-                "distrito": str(r.get(COLF_DIST, "")),
-                "direccion": "No disponible (a incorporar)",
-                "capa": "",
-                "estructura_as": float(r.get(COLF_EAS, 0.0)),
-                "estructura_ebp": float(r.get(COLF_EBP, 0.0)),
-                "estructura_ad": float(r.get(COLF_EAD, 0.0)),
-                "clientes_unicos": int(r.get(COLF_CLI, 0)),
-                "total_tickets": int(r.get(COLF_TKT, 0)),
-                "red_lines": float(r.get(COLF_RED, 0.0)),
-            })
-
-        return jsonify({
-            "puntos": puntos,
-            "total_atms": total_oficinas,
-            "total_oficinas": total_oficinas,
-            "total_islas": 0,
-            "total_disp": 0,
-            "total_mon": 0,
-            "total_rec": 0,
-            "suma_total": suma_total,
-            "total_agentes": 0,
-            "total_capa_A1": 0,
-            "total_capa_A2": 0,
-            "total_capa_A3": 0,
-            "total_capa_B": 0,
-            "total_capa_C": 0,
-
-            "prom_estructura_as": prom_eas,
-            "prom_estructura_ebp": prom_ebp,
-            "prom_estructura_ad": prom_ead,
-            "prom_clientes_unicos": prom_cli,
-            "prom_total_tickets": prom_tkt,
-            "prom_redlines": prom_red,
-        })
-
-    return jsonify({
-        "puntos": [],
-        "total_atms": 0,
-        "total_oficinas": 0,
-        "total_islas": 0,
-        "total_disp": 0,
-        "total_mon": 0,
-        "total_rec": 0,
-        "suma_total": 0.0,
-        "total_agentes": 0,
-        "total_capa_A1": 0,
-        "total_capa_A2": 0,
-        "total_capa_A3": 0,
-        "total_capa_B": 0,
-        "total_capa_C": 0,
-    })
-
-# ============================================================
-# ENDPOINT DE CLIENTES CON MUESTREO DINÁMICO
-# ============================================================
 @app.route("/api/clientes")
 @login_required
 def api_clientes():
@@ -1458,13 +1235,13 @@ def api_clientes():
     dpto = request.args.get("departamento", "").upper().strip()
     prov = request.args.get("provincia", "").upper().strip()
     dist = request.args.get("distrito", "").upper().strip()
-    seg = request.args.get("segmento", "").upper().strip()
+    #seg = request.args.get("segmento", "").upper().strip()
 
     dff = df_clientes.copy()
     if dpto: dff = dff[dff["departamento"].str.upper() == dpto]
     if prov: dff = dff[dff["provincia"].str.upper() == prov]
     if dist: dff = dff[dff["distrito"].str.upper() == dist]
-    if seg:  dff = dff[dff["segmento"].astype(str).str.upper() == seg]
+    #if seg:  dff = dff[dff["segmento"].astype(str).str.upper() == seg]
 
     if dff.empty:
         return jsonify([])
@@ -1527,21 +1304,11 @@ def api_heat_cant_clientes():
     except:
         zoom = 10
 
-    dpto = request.args.get("departamento", "").upper().strip()
-    prov = request.args.get("provincia", "").upper().strip()
-    dist = request.args.get("distrito", "").upper().strip()
-
+    # ✅ Ya NO se filtra por Departamento / Provincia / Distrito
     if df_comercios is None or df_comercios.empty:
         return jsonify([])
 
     dff = df_comercios.copy()
-    dff["DEPARTAMENTO"] = dff["DEPARTAMENTO"].astype(str).str.upper().str.strip()
-    dff["PROVINCIA"]    = dff["PROVINCIA"].astype(str).str.upper().str.strip()
-    dff["DISTRITO"]     = dff["DISTRITO"].astype(str).str.upper().str.strip()
-
-    if dpto: dff = dff[dff["DEPARTAMENTO"] == dpto]
-    if prov: dff = dff[dff["PROVINCIA"] == prov]
-    if dist: dff = dff[dff["DISTRITO"] == dist]
 
     if dff.empty:
         return jsonify([])
@@ -1569,7 +1336,7 @@ def api_heat_cant_clientes():
     # ✅ zoom alto: raw (pero con cap estable por seguridad)
     max_raw = 60000
     if len(dff) > max_raw:
-        seed = _stable_seed(f"{zoom}|{dpto}|{prov}|{dist}|RAW")
+        seed = _stable_seed(f"{zoom}|RAW")
         dff = dff.sample(max_raw, replace=False, random_state=seed)
 
     out = []
@@ -1597,21 +1364,11 @@ def api_comercios_points():
     except:
         zoom = 10
 
-    dpto = request.args.get("departamento", "").upper().strip()
-    prov = request.args.get("provincia", "").upper().strip()
-    dist = request.args.get("distrito", "").upper().strip()
-
+    # ✅ Ya NO se filtra por Departamento / Provincia / Distrito
     if df_comercios is None or df_comercios.empty:
         return jsonify([])
 
     dff = df_comercios.copy()
-    dff["DEPARTAMENTO"] = dff["DEPARTAMENTO"].astype(str).str.upper().str.strip()
-    dff["PROVINCIA"]    = dff["PROVINCIA"].astype(str).str.upper().str.strip()
-    dff["DISTRITO"]     = dff["DISTRITO"].astype(str).str.upper().str.strip()
-
-    if dpto: dff = dff[dff["DEPARTAMENTO"] == dpto]
-    if prov: dff = dff[dff["PROVINCIA"] == prov]
-    if dist: dff = dff[dff["DISTRITO"] == dist]
 
     if dff.empty:
         return jsonify([])
@@ -1629,7 +1386,7 @@ def api_comercios_points():
         cap = 30000
 
     if len(dff) > cap:
-        seed = _stable_seed(f"{zoom}|{dpto}|{prov}|{dist}|PTS")
+        seed = _stable_seed(f"{zoom}|PTS")
         dff = dff.sample(cap, replace=False, random_state=seed)
 
     out = []
@@ -1749,12 +1506,14 @@ def api_points_integral():
     suma_of = float(dfO[COLF_TRX].sum())
 
     total_of = int(len(dfO))
-    prom_of_eas = float(dfO[COLF_EAS].mean()) if total_of > 0 else 0.0
-    prom_of_ebp = float(dfO[COLF_EBP].mean()) if total_of > 0 else 0.0
-    prom_of_ead = float(dfO[COLF_EAD].mean()) if total_of > 0 else 0.0
-    prom_of_cli = float(dfO[COLF_CLI].mean()) if total_of > 0 else 0.0
-    prom_of_tkt = float(dfO[COLF_TKT].mean()) if total_of > 0 else 0.0
-    prom_of_red = float(dfO[COLF_RED].mean()) if total_of > 0 else 0.0
+    suma_of_eas = float(dfO[COLF_EAS].sum()) if len(dfO) else 0.0
+    suma_of_ebp = float(dfO[COLF_EBP].sum()) if len(dfO) else 0.0
+    suma_of_ead = float(dfO[COLF_EAD].sum()) if len(dfO) else 0.0
+    suma_of_cli = float(dfO[COLF_CLI].sum()) if len(dfO) else 0.0
+    suma_of_tkt = float(dfO[COLF_TKT].sum()) if len(dfO) else 0.0
+
+    # redlines promedio se mantiene
+    prom_of_red = float(dfO[COLF_RED].mean()) if len(dfO) else 0.0
 
     for _, r in dfO.iterrows():
         puntos_of.append({
@@ -1770,7 +1529,10 @@ def api_points_integral():
             "departamento": str(r.get(COLF_DEPT, "")),
             "provincia": str(r.get(COLF_PROV, "")),
             "distrito": str(r.get(COLF_DIST, "")),
-            "direccion": "No disponible (a incorporar)",
+            "direccion": str(r.get(COLF_DIR, "")).strip(),
+            "performance_2025": str(r.get(COLF_PERF, "")).strip(),
+            "bai": float(r.get(COLF_BAI, 0.0)),
+            "margen_neto": float(r.get(COLF_MARG, 0.0)),
             "estructura_as": float(r.get(COLF_EAS, 0.0)),
             "estructura_ebp": float(r.get(COLF_EBP, 0.0)),
             "estructura_ad": float(r.get(COLF_EAD, 0.0)),
@@ -1825,11 +1587,13 @@ def api_points_integral():
         "total_oficinas": len(puntos_of),
         "total_agentes": len(puntos_ag),
 
-        "prom_ofi_estructura_as": prom_of_eas,
-        "prom_ofi_estructura_ebp": prom_of_ebp,
-        "prom_ofi_estructura_ad": prom_of_ead,
-        "prom_ofi_clientes_unicos": prom_of_cli,
-        "prom_ofi_total_tickets": prom_of_tkt,
+        "suma_ofi_estructura_as": suma_of_eas,
+        "suma_ofi_estructura_ebp": suma_of_ebp,
+        "suma_ofi_estructura_ad": suma_of_ead,
+        "suma_ofi_clientes_unicos": suma_of_cli,
+        "suma_ofi_total_tickets": suma_of_tkt,
+
+        # Red Lines se mantiene como promedio
         "prom_ofi_redlines": prom_of_red,
     })
 
@@ -1877,16 +1641,43 @@ body{
 }
 
     header{
-      background:#003366; color:white; height:70px;
-      display:flex; align-items:center; justify-content:center;
-      position:relative; box-shadow:0 6px 18px rgba(0,0,0,0.25);
+      background:var(--bbva-dark);
+      color:#fff;
+      height:74px;                /* altura mayor que el logo */
+      padding:0 16px;
+
+      display:grid;
+      grid-template-columns:200px 1fr 160px;
+      align-items:center;
     }
-    header h1{ margin:0; font-size:1.9rem; }
+    header h1{
+      margin:0;
+      font-size:22px;
+      font-weight:800;
+      text-align:center;
+    }
     .logout{
-      position:absolute; right:20px;
-      background:#1464A5; color:white;
-      padding:8px 16px; border-radius:8px;
-      text-decoration:none; font-weight:600;
+      justify-self:end;
+      background:#1f6fb2;
+      padding:6px 10px;
+      border-radius:6px;
+      color:#fff;
+      text-decoration:none;
+      font-weight:700;
+    }
+    /* Logo BBVA en el header (esquina izquierda) */
+    .header-logo{
+      display:flex;
+      align-items:center;
+      justify-content:flex-start;
+    }
+
+    .header-logo img{
+      height:70px;
+      width:auto;
+      max-width:240px;
+      object-fit:contain;
+      border-radius:8px;
     }
     .topbar{
   padding:16px 20px 8px 20px;
@@ -1908,13 +1699,71 @@ body{
   gap:18px;
   box-sizing:border-box;
 }
-   #map{
+.map-wrap{
   flex:1 1 auto;
-  min-width:0;              /* ✅ evita problemas de ancho */
-  height:100%;              /* ✅ en vez de 74vh */
+  min-width:0;
+  height:100%;
+  position:relative;          /* ✅ necesario para superponer la leyenda */
+}
+
+#map{
+  width:100%;
+  height:100%;
   border-radius:12px;
   overflow:hidden;
   box-shadow:0 8px 24px rgba(0,0,0,0.18);
+}
+
+/* ✅ Leyenda flotante sobre el mapa */
+.global-legend.map-overlay{
+  position:absolute;
+  left:14px;
+  bottom:14px;
+  z-index:700;                /* arriba del mapa */
+  width:260px;
+  padding:10px 10px 8px 10px;
+  background:rgba(255,255,255,0.92);
+  backdrop-filter: blur(6px);
+  -webkit-backdrop-filter: blur(6px);
+  box-shadow:0 10px 26px rgba(7,33,70,0.18);
+}
+/* ===== Resaltado temporal de oficina seleccionada ===== */
+.office-focus-icon{
+  background:transparent;
+  border:none;
+}
+
+.office-focus-wrap{
+  width:58px;
+  height:58px;
+  border-radius:50%;
+  background:rgba(20,100,165,0.18);
+  border:4px solid #1464A5;
+  box-shadow:
+    0 0 0 8px rgba(20,100,165,0.12),
+    0 0 18px rgba(20,100,165,0.45);
+  animation: officePulse 1.6s ease-in-out infinite;
+}
+
+@keyframes officePulse{
+  0%{
+    transform:scale(0.96);
+    box-shadow:
+      0 0 0 4px rgba(20,100,165,0.18),
+      0 0 12px rgba(20,100,165,0.35);
+  }
+  50%{
+    transform:scale(1.06);
+    box-shadow:
+      0 0 0 10px rgba(20,100,165,0.10),
+      0 0 24px rgba(20,100,165,0.55);
+  }
+  100%{
+    transform:scale(0.96);
+    box-shadow:
+      0 0 0 4px rgba(20,100,165,0.18),
+      0 0 12px rgba(20,100,165,0.35);
+  }
 }
 .side{
   width:360px;
@@ -1925,9 +1774,195 @@ body{
   flex-direction:column;
   gap:12px;
 }
-    .side-card{ background:white; border-radius:12px; padding:14px 16px; box-shadow:0 6px 22px rgba(0,0,0,0.12); font-size:13px; }
-    .side-title{ font-weight:800; margin-bottom:6px; display:flex; align-items:center; gap:8px; }
-    .muted{ color:var(--muted); font-size:12px; }
+    .side-card{
+      background:linear-gradient(180deg, #ffffff 0%, #f8fbff 100%);
+      border-radius:18px;
+      padding:16px;
+      box-shadow:0 10px 28px rgba(7,33,70,0.10);
+      border:1px solid rgba(20,100,165,0.10);
+      font-size:13px;
+    }
+
+    /* ===== Leyenda global del sidebar ===== */
+    .global-legend{
+      background:#fff;
+      border:1px solid rgba(20,100,165,0.10);
+      border-radius:18px;
+      padding:12px 12px 10px 12px;
+      box-shadow:0 8px 22px rgba(7,33,70,0.08);
+    }
+
+    .global-legend .gl-title{
+      font-size:12px;
+      font-weight:800;
+      color:var(--bbva-dark);
+      margin-bottom:8px;
+    }
+
+    .global-legend .gl-items{
+      display:grid;
+      grid-template-columns:1fr 1fr;
+      gap:8px 10px;
+    }
+
+    .global-legend .gl-item{
+      display:flex;
+      align-items:center;
+      gap:10px;
+      padding:8px 10px;
+      border-radius:14px;
+      background:#f7fbff;
+      border:1px solid rgba(20,100,165,0.08);
+    }
+
+    .global-legend .gl-item img{
+      width:24px;
+      height:24px;
+      object-fit:contain;
+      background:#fff;
+      border:1px solid #e6eef8;
+      border-radius:10px;
+      padding:4px;
+    }
+
+    .global-legend .gl-item span{
+      font-size:12px;
+      color:var(--muted);
+      font-weight:700;
+      line-height:1.1;
+    }
+
+    .side-title{
+      font-weight:800;
+      margin-bottom:4px;
+      display:flex;
+      align-items:center;
+      gap:8px;
+      font-size:15px;
+      color:var(--bbva-dark);
+    }
+
+    .muted{
+      color:var(--muted);
+      font-size:12px;
+      line-height:1.35;
+    }
+
+    /* ===== Dashboard summary panels ===== */
+    .dash-panel{
+      display:flex;
+      flex-direction:column;
+      gap:12px;
+    }
+
+    .dash-top{
+      display:grid;
+      grid-template-columns:1fr 1fr;
+      gap:10px;
+    }
+
+    .dash-kpi{
+      background:#ffffff;
+      border:1px solid rgba(20,100,165,0.10);
+      border-radius:14px;
+      padding:12px 12px 10px 12px;
+      box-shadow:0 4px 12px rgba(7,33,70,0.05);
+    }
+
+    .dash-kpi .k-label{
+      font-size:11px;
+      color:var(--muted);
+      margin-bottom:4px;
+    }
+
+    .dash-kpi .k-value{
+      font-size:22px;
+      font-weight:800;
+      color:var(--bbva-dark);
+      line-height:1.05;
+    }
+
+    .dash-section{
+      background:#ffffff;
+      border:1px solid rgba(20,100,165,0.10);
+      border-radius:14px;
+      padding:12px;
+    }
+
+    .dash-section-title{
+      font-size:12px;
+      font-weight:800;
+      color:var(--bbva-dark);
+      margin-bottom:8px;
+    }
+
+    .dash-grid-2{
+      display:grid;
+      grid-template-columns:1fr 1fr;
+      gap:8px 12px;
+    }
+
+    .dash-grid-3{
+      display:grid;
+      grid-template-columns:1fr 1fr 1fr;
+      gap:8px;
+    }
+
+    .metric-mini{
+      display:flex;
+      flex-direction:column;
+      gap:2px;
+      padding:8px 10px;
+      background:#f7fbff;
+      border-radius:12px;
+      border:1px solid rgba(20,100,165,0.08);
+    }
+
+    .metric-mini .m-label{
+      font-size:11px;
+      color:var(--muted);
+    }
+
+    .metric-mini .m-value{
+      font-size:15px;
+      font-weight:800;
+      color:var(--bbva-dark);
+    }
+
+    .legend.compact{
+      margin-top:0;
+    }
+
+    .legend.compact .legend-title{
+      font-size:12px;
+      font-weight:800;
+      color:var(--bbva-dark);
+      margin-bottom:8px;
+    }
+
+    .legend.compact .legend-item{
+      display:flex;
+      align-items:center;
+      gap:10px;
+      margin-top:6px;
+    }
+
+    .legend.compact .legend-item img{
+      width:22px;
+      height:22px;
+      object-fit:contain;
+      background:#fff;
+      border:1px solid #e6eef8;
+      border-radius:10px;
+      padding:4px;
+      box-shadow:none;
+    }
+
+    .legend.compact .lbl{
+      color:var(--muted);
+      font-size:12px;
+      line-height:1.2;
+    }
     .brand-card{ padding:10px; }
     .brand-card img{ width:100%; height:120px; object-fit:cover; border-radius:10px; display:block; }
     .legend{ margin-top:10px; }
@@ -2320,7 +2355,10 @@ label:has(#chkHeatClientes){
 
 <body>
   <header>
-    <h1>Mapa BBVA — {% if tipo_mapa == 'islas' %} ATMs {% else %} {{ tipo_mapa|upper }} {% endif %}</h1>
+    <div class="header-logo">
+      <img src="{{ url_for('static', filename='banco.png') }}" alt="BBVA">
+    </div>
+    <h1>TRI - TERRITORIAL INTELIGENCE</h1>
     <a href="/logout" class="logout">Cerrar sesión</a>
   </header>
 
@@ -2338,12 +2376,18 @@ label:has(#chkHeatClientes){
       <label>Provincia:
         <select id="selProvincia">
           <option value="">-- Todas --</option>
+          {% for p in all_provincias %}
+            <option value="{{p}}">{{p}}</option>
+          {% endfor %}
         </select>
       </label>
 
       <label>Distrito:
         <select id="selDistrito">
           <option value="">-- Todos --</option>
+          {% for d in all_distritos %}
+            <option value="{{d}}">{{d}}</option>
+          {% endfor %}
         </select>
       </label>
 
@@ -2356,11 +2400,11 @@ label:has(#chkHeatClientes){
         </select>
       </label>
 
-      <label>Segmento:
-        <select id="selSegmento">
-          <option value="">-- Todos --</option>
-          {% for seg in segment_list %}
-            <option value="{{ seg }}">{{ seg }}</option>
+      <label>Oficina:
+        <select id="selOficina">
+          <option value="">-- Ubicar oficina --</option>
+          {% for ofi in oficinas_lookup %}
+            <option value="{{ loop.index0 }}">{{ ofi.nombre }}</option>
           {% endfor %}
         </select>
       </label>
@@ -2419,14 +2463,35 @@ label:has(#chkHeatClientes){
   </div>
 
   <div class="main">
-    <div id="map"></div>
+    <div class="map-wrap">
+      <div id="map"></div>
+
+      <!-- ✅ Leyenda flotante sobre el mapa -->
+      <div id="mapLegend" class="global-legend map-overlay">
+        <div class="gl-title">Leyenda</div>
+        <div class="gl-items">
+          <div class="gl-item">
+            <img src="{{ url_for('static', filename='atm_oficina1.png') }}" alt="ATM en Oficina">
+            <span>ATM en Oficina</span>
+          </div>
+          <div class="gl-item">
+            <img src="{{ url_for('static', filename='atm_isla1.png') }}" alt="ATM en Isla">
+            <span>ATM en Isla</span>
+          </div>
+          <div class="gl-item">
+            <img src="{{ url_for('static', filename='oficina1.png') }}" alt="Oficina">
+            <span>Oficina</span>
+          </div>
+          <div class="gl-item">
+            <img src="{{ url_for('static', filename='agente1.png') }}" alt="Agente">
+            <span>Agente</span>
+          </div>
+        </div>
+      </div>
+    </div>
 
     <div class="side">
-      {% if tipo_mapa == 'integral' %}
-      <div class="side-card brand-card">
-        <img src="{{ url_for('static', filename='banco.png') }}" alt="BBVA">
-      </div>
-      {% endif %}
+
 
       <!-- ✅ PANEL ZONAS -->
       <div id="panelZonasLegend" class="side-card">
@@ -2481,99 +2546,187 @@ label:has(#chkHeatClientes){
         </div>
       </div>
 
-      <!-- ✅ PANEL df_comercios -->
-      <div id="panelDfComercios" class="side-card hidden">
-        <div class="side-title">📌 Panel df_comercios</div>
-        <div class="muted">Se actualiza con filtros y solo cuenta si “df_comercios (puntos)” está activado.</div>
-        <div style="margin-top:8px;"><b>Total puntos:</b> <span id="dfcTotal">0</span></div>
-        <div class="muted" style="margin-top:4px;"><b>Suma cant_clientes:</b> <span id="dfcSum">0</span></div>
-        <div class="muted"><b>Promedio cant_clientes:</b> <span id="dfcAvg">0</span></div>
-      </div>
+      <!--
+      <div id="panelDfComercios" class="card panel-df-comercios" style="display:none;">
+        <div class="panel-title">
+          📌 Panel df_comercios
+        </div>
 
-      <div id="panelATMResumen" class="side-card {% if tipo_mapa != 'integral' and tipo_mapa != 'islas' %}hidden{% endif %}">
-        <div class="side-title">🌐 Panel ATMs</div>
-        {% if tipo_mapa == 'integral' %}
-          <div class="muted">Se actualiza con filtros y solo cuenta si ATMs está activado.</div>
-        {% else %}
-          <div class="muted">Se actualiza con filtros (solo ATMs).</div>
-        {% endif %}
-        <div style="margin-top:8px;"><b>Total ATMs:</b> <span id="resAtmTotal">0</span></div>
-        <div class="muted" style="margin-top:4px;"><b>Suma TRX:</b> <span id="resAtmSuma">0</span></div>
+        <div class="panel-note">
+          Se actualiza con filtros y solo cuenta si "df_comercios (puntos)" está activado.
+        </div>
 
-        <div style="margin-top:10px; font-weight:700;">Distribución</div>
-        <div class="muted">ATMs en oficina: <span id="resAtmEnOfi">0</span></div>
-        <div class="muted">ATMs en isla: <span id="resAtmEnIsla">0</span></div>
-
-        <div style="margin-top:10px; font-weight:700;">Tipos</div>
-        <div class="muted">Dispensador: <span id="resAtmDisp">0</span></div>
-        <div class="muted">Monedero: <span id="resAtmMon">0</span></div>
-        <div class="muted">Reciclador: <span id="resAtmRec">0</span></div>
-
-        <div class="legend">
-          <div style="font-weight:700;">Leyenda</div>
-          <div class="legend-item">
-            <img src="{{ url_for('static', filename='atm_oficina1.png') }}" alt="ATM Oficina">
-            <div class="lbl">ATM en Oficina</div>
+        <div class="panel-stats">
+          <div class="stat-row">
+            <span>Total puntos:</span>
+            <span id="dfcTotal">0</span>
           </div>
-          <div class="legend-item">
-            <img src="{{ url_for('static', filename='atm_isla1.png') }}" alt="ATM Isla">
-            <div class="lbl">ATM en Isla</div>
+          <div class="stat-row">
+            <span>Suma cant_clientes:</span>
+            <span id="dfcSumClientes">0</span>
+          </div>
+          <div class="stat-row">
+            <span>Promedio cant_clientes:</span>
+            <span id="dfcAvgClientes">0</span>
           </div>
         </div>
       </div>
+      -->
 
-      <!-- ✅ PANEL OFICINAS -->
-      <div id="panelOfiResumen" class="side-card {% if tipo_mapa != 'integral' and tipo_mapa != 'oficinas' %}hidden{% endif %}">
-        <div class="side-title">🏦 Panel Oficinas</div>
-        {% if tipo_mapa == 'integral' %}
-          <div class="muted">Se actualiza con filtros y solo cuenta si Oficinas está activado.</div>
-        {% else %}
-          <div class="muted">Se actualiza con filtros (solo Oficinas).</div>
-        {% endif %}
-
-        <div style="margin-top:8px;"><b>Total Oficinas:</b> <span id="resOfiTotal">0</span></div>
-        <div class="muted" style="margin-top:4px;"><b>Suma TRX:</b> <span id="resOfiSuma">0</span></div>
-
-        <div class="muted" style="margin-top:6px;"><b>Prom. ESTRUCTURA AS:</b> <span id="resOfiPromEAS">0</span></div>
-        <div class="muted"><b>Prom. ESTRUCTURA EBP:</b> <span id="resOfiPromEBP">0</span></div>
-        <div class="muted"><b>Prom. ESTRUCTURA AD:</b> <span id="resOfiPromEAD">0</span></div>
-        <div class="muted"><b>Prom. Clientes únicos:</b> <span id="resOfiPromCLI">0</span></div>
-        <div class="muted"><b>Prom. Total tickets:</b> <span id="resOfiPromTKT">0</span></div>
-        <div class="muted"><b>Prom. Red Lines:</b> <span id="resOfiPromRED">0%</span></div>
-
-        <div class="legend">
-          <div style="font-weight:700;">Leyenda</div>
-          <div class="legend-item">
-            <img src="{{ url_for('static', filename='oficina1.png') }}" alt="Oficina">
-            <div class="lbl">Oficina</div>
+      <div id="panelATMResumen" class="side-card hidden">
+        <div class="dash-panel">
+          <div>
+            <div class="side-title">🌐 Panel ATMs</div>
+            <div class="muted">Se actualiza con filtros y solo cuenta si ATMs está activado.</div>
           </div>
+
+          <div class="dash-top">
+            <div class="dash-kpi">
+              <div class="k-label">Total ATMs</div>
+              <div class="k-value" id="resAtmTotal">0</div>
+            </div>
+            <div class="dash-kpi">
+              <div class="k-label">Suma TRX</div>
+              <div class="k-value" id="resAtmSuma">0</div>
+            </div>
+          </div>
+
+          <div class="dash-section">
+            <div class="dash-section-title">Distribución</div>
+            <div class="dash-grid-2">
+              <div class="metric-mini">
+                <div class="m-label">ATM en oficina</div>
+                <div class="m-value" id="resAtmEnOfi">0</div>
+              </div>
+              <div class="metric-mini">
+                <div class="m-label">ATM en isla</div>
+                <div class="m-value" id="resAtmEnIsla">0</div>
+              </div>
+            </div>
+          </div>
+
+          <div class="dash-section">
+            <div class="dash-section-title">Tipos</div>
+            <div class="dash-grid-3">
+              <div class="metric-mini">
+                <div class="m-label">Dispensador</div>
+                <div class="m-value" id="resAtmDisp">0</div>
+              </div>
+              <div class="metric-mini">
+                <div class="m-label">Monedero</div>
+                <div class="m-value" id="resAtmMon">0</div>
+              </div>
+              <div class="metric-mini">
+                <div class="m-label">Reciclador</div>
+                <div class="m-value" id="resAtmRec">0</div>
+              </div>
+            </div>
+          </div>
+
         </div>
       </div>
 
-      <!-- ✅ PANEL AGENTES -->
-      <div id="panelAgResumen" class="side-card {% if tipo_mapa != 'integral' and tipo_mapa != 'agentes' %}hidden{% endif %}">
-        <div class="side-title">🧍 Panel Agentes</div>
-        {% if tipo_mapa == 'integral' %}
-          <div class="muted">Se actualiza con filtros y solo cuenta si Agentes está activado.</div>
-        {% else %}
-          <div class="muted">Se actualiza con filtros (solo Agentes).</div>
-        {% endif %}
-        <div style="margin-top:8px;"><b>Total Agentes:</b> <span id="resAgTotal">0</span></div>
-        <div class="muted" style="margin-top:4px;"><b>Suma TRX:</b> <span id="resAgSuma">0</span></div>
-
-        <div style="margin-top:10px; font-weight:700;">Capas</div>
-        <div class="muted">A1: <span id="resAgA1">0</span></div>
-        <div class="muted">A2: <span id="resAgA2">0</span></div>
-        <div class="muted">A3: <span id="resAgA3">0</span></div>
-        <div class="muted">B : <span id="resAgB">0</span></div>
-        <div class="muted">C : <span id="resAgC">0</span></div>
-
-        <div class="legend">
-          <div style="font-weight:700;">Leyenda</div>
-          <div class="legend-item">
-            <img src="{{ url_for('static', filename='agente1.png') }}" alt="Agente">
-            <div class="lbl">Agente</div>
+      <div id="panelOfiResumen" class="side-card hidden">
+        <div class="dash-panel">
+          <div>
+            <div class="side-title">🏦 Panel Oficinas</div>
+            <div class="muted">Se actualiza con filtros y solo cuenta si Oficinas está activado.</div>
           </div>
+
+          <div class="dash-top">
+            <div class="dash-kpi">
+              <div class="k-label">Total Oficinas</div>
+              <div class="k-value" id="resOfiTotal">0</div>
+            </div>
+            <div class="dash-kpi">
+              <div class="k-label">Suma TRX</div>
+              <div class="k-value" id="resOfiSuma">0</div>
+            </div>
+          </div>
+
+          <div class="dash-section">
+            <div class="dash-section-title">Estructura</div>
+            <div class="dash-grid-3">
+              <div class="metric-mini">
+                <div class="m-label">Total AS</div>
+                <div class="m-value" id="resOfiPromEAS">0</div>
+              </div>
+              <div class="metric-mini">
+                <div class="m-label">Total EBP</div>
+                <div class="m-value" id="resOfiPromEBP">0</div>
+              </div>
+              <div class="metric-mini">
+                <div class="m-label">Total AD</div>
+                <div class="m-value" id="resOfiPromEAD">0</div>
+              </div>
+            </div>
+          </div>
+
+          <div class="dash-section">
+            <div class="dash-section-title">Indicadores</div>
+            <div class="dash-grid-2">
+              <div class="metric-mini">
+                <div class="m-label">Clientes únicos</div>
+                <div class="m-value" id="resOfiPromCLI">0</div>
+              </div>
+              <div class="metric-mini">
+                <div class="m-label">Total tickets</div>
+                <div class="m-value" id="resOfiPromTKT">0</div>
+              </div>
+              <div class="metric-mini" style="grid-column:1 / -1;">
+                <div class="m-label">Prom. Red Lines</div>
+                <div class="m-value" id="resOfiPromRED">0%</div>
+              </div>
+            </div>
+          </div>
+
+        </div>
+      </div>
+
+      <div id="panelAgResumen" class="side-card hidden">
+        <div class="dash-panel">
+          <div>
+            <div class="side-title">🧍 Panel Agentes</div>
+            <div class="muted">Se actualiza con filtros y solo cuenta si Agentes está activado.</div>
+          </div>
+
+          <div class="dash-top">
+            <div class="dash-kpi">
+              <div class="k-label">Total Agentes</div>
+              <div class="k-value" id="resAgTotal">0</div>
+            </div>
+            <div class="dash-kpi">
+              <div class="k-label">Suma TRX</div>
+              <div class="k-value" id="resAgSuma">0</div>
+            </div>
+          </div>
+
+          <div class="dash-section">
+            <div class="dash-section-title">Capas</div>
+            <div class="dash-grid-3">
+              <div class="metric-mini">
+                <div class="m-label">A1</div>
+                <div class="m-value" id="resAgA1">0</div>
+              </div>
+              <div class="metric-mini">
+                <div class="m-label">A2</div>
+                <div class="m-value" id="resAgA2">0</div>
+              </div>
+              <div class="metric-mini">
+                <div class="m-label">A3</div>
+                <div class="m-value" id="resAgA3">0</div>
+              </div>
+              <div class="metric-mini">
+                <div class="m-label">B</div>
+                <div class="m-value" id="resAgB">0</div>
+              </div>
+              <div class="metric-mini">
+                <div class="m-label">C</div>
+                <div class="m-value" id="resAgC">0</div>
+              </div>
+            </div>
+          </div>
+
         </div>
       </div>
 
@@ -2615,7 +2768,13 @@ label:has(#chkHeatClientes){
     const DIV_BY_PROV  = {{ div_by_prov|tojson }};
     const DIV_BY_DIST  = {{ div_by_dist|tojson }};
 
+    const ALL_PROVINCIAS = {{ all_provincias|tojson }};
+    const ALL_DISTRITOS  = {{ all_distritos|tojson }};
+
     const TIPO_MAPA = "{{ tipo_mapa }}";
+
+    const OFICINAS_LOOKUP = {{ oficinas_lookup|tojson }};
+
     const INITIAL_CENTER = [{{ initial_center[0] }}, {{ initial_center[1] }}];
     const INITIAL_ZOOM = {{ initial_zoom }};
 
@@ -2711,9 +2870,53 @@ function getTrxHaloIcon(pt){
 
 
 
-    const fmt2 = (v)=> (Number(v||0)).toFixed(2);
-    const fmt0 = (v)=> String(Math.round(Number(v||0)));
-    const fmtPct = (v)=> `${(Number(v||0)).toFixed(2)}%`;
+    const fmt2 = (v)=> {
+      const n = Number(v || 0);
+      return (isFinite(n) ? n : 0).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+    };
+
+    const fmt0 = (v)=> {
+      const n = Math.round(toNumberIntl(v));
+      return (isFinite(n) ? n : 0).toLocaleString("en-US");
+    };
+
+    const fmtPct = (v)=> {
+      const n = Number(v || 0);
+      return `${(isFinite(n) ? n : 0).toFixed(2)}%`;
+    };
+
+    function toNumberIntl(v){
+  if(v === null || v === undefined) return 0;
+  if(typeof v === "number") return isFinite(v) ? v : 0;
+
+  let s = String(v).trim();
+  if(!s) return 0;
+  s = s.replace(/\s/g, "");
+  s = s.replace(/[^\d\-\.,]/g, "");
+
+  // miles con puntos: -665.254 / 3.406.481
+  if(!s.includes(",") && /^-?\d{1,3}(\.\d{3})+$/.test(s)){
+    s = s.replace(/\./g, "");
+  }
+  // ambos: '.' miles y ',' decimal
+  else if(s.includes(".") && s.includes(",")){
+    s = s.replace(/\./g, "").replace(",", ".");
+  }
+  // solo coma => decimal
+  else if(s.includes(",") && !s.includes(".")){
+    s = s.replace(",", ".");
+  }
+
+  const n = Number(s);
+  return isFinite(n) ? n : 0;
+}
+
+function fmtKM(v){
+  const n = Math.abs(toNumberIntl(v)); // sin signo
+  if(n >= 1e6) return `${Math.round(n/1e6)}MM`; // 👈 AQUÍ
+  if(n >= 1e3) return `${Math.round(n/1e3)}K`;
+  return `${Math.round(n)}`;
+}
 
     const esc = (s) => String(s ?? "")
     .replace(/&/g,"&amp;")
@@ -2733,6 +2936,12 @@ function getTrxHaloIcon(pt){
     // ======================================================
     const map = L.map('map').setView(INITIAL_CENTER, INITIAL_ZOOM);
     L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{ maxZoom:19 }).addTo(map);
+    // ✅ Evita que al interactuar con la leyenda se mueva el mapa
+    const mapLegend = document.getElementById("mapLegend");
+    if(mapLegend){
+      L.DomEvent.disableClickPropagation(mapLegend);
+      L.DomEvent.disableScrollPropagation(mapLegend);
+    }
     requestAnimationFrame(() => map.invalidateSize());
     window.addEventListener("resize", () => map.invalidateSize());
 
@@ -2760,6 +2969,10 @@ map.getPane('heatGlowPane').style.mixBlendMode = "screen";
     // LAYERS BASE
     // ======================================================
     const markers = L.markerClusterGroup({ chunkedLoading:true });
+    // ===== Estado para ubicar/resaltar oficina =====
+    let currentOfficeFocusMarker = null;
+    let currentOfficeFocusCircle = null;
+    let latestOficinasData = [];
 
 // ✅ Un SOLO gradiente (como dashboard de tu captura)
 // ======================================================
@@ -2910,7 +3123,7 @@ async function fetchHeatClientes(force=false){
     const d  = (selDep?.value || "");
     const p  = (selProv?.value || "");
     const di = (selDist?.value || "");
-    const seg = (selSegmento?.value || "");
+    const seg = "";
 
     const key = `${zoom}|${d}|${p}|${di}|${seg}`;
 
@@ -3077,6 +3290,7 @@ const comerciosCluster = L.markerClusterGroup({
     const selProv = document.getElementById("selProvincia");
     const selDist = document.getElementById("selDistrito");
     const selDiv = document.getElementById("selDivision");
+    const selOficina = document.getElementById("selOficina");
 
     const chkHeat = document.getElementById("chkHeat");
     const chkHeatClientes = document.getElementById("chkHeatClientes");
@@ -3095,7 +3309,7 @@ if(chkHeat) chkHeat.addEventListener("change", setHeatOnClass);
 
     const selTipoATM = document.getElementById("selTipoATM");
     const selUbicATM = document.getElementById("selUbicacionATM");
-    const selSegmento = document.getElementById("selSegmento");
+    const selSegmento = null;
 
     const chkReco = document.getElementById("chkReco");
     const chkZonaRural  = document.getElementById("chkZonaRural");
@@ -3369,7 +3583,7 @@ chkHeatClientes.addEventListener("change", () => {
 });
 
 // si cambian filtros -> vuelve a calcular (con debounce)
-[selDep, selProv, selDist, selSegmento].forEach(el => {
+[selDep, selProv, selDist].forEach(el => {
   if(!el) return;
   el.addEventListener("change", () => {
     if(chkHeatClientes && chkHeatClientes.checked){
@@ -3385,6 +3599,7 @@ map.on("zoomend moveend", () => {
   }
 });
 
+refreshGeoSelectors();
 // por si el checkbox arranca marcado (cache del navegador)
 map.whenReady(() => {
   if(chkHeatClientes && chkHeatClientes.checked){
@@ -3464,9 +3679,9 @@ map.whenReady(() => {
 
           <div class="dp-kpis">
             <div class="kpi"><div class="lbl">Clientes afectados</div><div class="val">${fmt0(r.clientes_afectados)}</div></div>
-            <div class="kpi"><div class="lbl">% Digitales</div><div class="val">${(Number(r.pct_digital||0)*100).toFixed(1)}%</div></div>
-            <div class="kpi"><div class="lbl">Edad promedio</div><div class="val">${Number(r.edad_prom||0).toFixed(1)}</div></div>
-            <div class="kpi"><div class="lbl">Ingreso promedio</div><div class="val">S/ ${Number(r.ingreso_prom||0).toFixed(2)}</div></div>
+            <!--<div class="kpi"><div class="lbl">% Digitales</div><div class="val">${(Number(r.pct_digital||0)*100).toFixed(1)}%</div></div>-->
+            <!--<div class="kpi"><div class="lbl">Edad promedio</div><div class="val">${Number(r.edad_prom||0).toFixed(1)}</div></div>-->
+            <!--<div class="kpi"><div class="lbl">Ingreso promedio</div><div class="val">S/ ${Number(r.ingreso_prom||0).toFixed(2)}</div></div>-->
           </div>
 
           <div class="dp-section">
@@ -3601,11 +3816,14 @@ _____________________ Promedio: ${pt.promedio} _____________________`;
             <div class="kpi"><div class="lbl">Clientes únicos</div><div class="val">${fmt0(pt.clientes_unicos)}</div></div>
             <div class="kpi"><div class="lbl">Total tickets</div><div class="val">${fmt0(pt.total_tickets)}</div></div>
             <div class="kpi"><div class="lbl">Red Lines</div><div class="val">${fmtPct(pt.red_lines)}</div></div>
+            <div class="kpi"><div class="lbl">BAI</div><div class="val">${fmtKM(pt.bai ?? 0)}</div></div>
+<div class="kpi"><div class="lbl">Margen Neto</div><div class="val">${fmtKM(pt.margen_neto ?? 0)}</div></div>
           </div>
         `;
 
         infoRows = `
           <div class="dp-row"><span class="k">Código</span><span class="v">${esc(pt.atm)}</span></div>
+          <div class="dp-row"><span class="k">Performance 2025</span><span class="v">${esc(pt.performance_2025 || "—")}</span></div>
           <div class="dp-row"><span class="k">Dirección</span><span class="v">${esc(pt.direccion)}</span></div>
           <div class="dp-row"><span class="k">División</span><span class="v">${esc(pt.division)}</span></div>
           <div class="dp-row"><span class="k">Ubicación geográfica</span><span class="v">${esc(ubic)}</span></div>
@@ -3624,8 +3842,8 @@ _____________________ Promedio: ${pt.promedio} _____________________`;
           <div class="dp-kpis">
             <div class="kpi"><div class="lbl">Promedio</div><div class="val">${fmt0(pt.promedio)}</div></div>
             <div class="kpi"><div class="lbl">Capa</div><div class="val">${esc(pt.capa || "—")}</div></div>
-            <div class="kpi"><div class="lbl">Trxs Oct</div><div class="val">${fmt0(pt.trxs_oct ?? 0)}</div></div>
-            <div class="kpi"><div class="lbl">Trxs Nov</div><div class="val">${fmt0(pt.trxs_nov ?? 0)}</div></div>
+         <div class="kpi"><div class="lbl">Trxs Dic</div><div class="val">${fmt0(pt.trxs_oct ?? 0)}</div></div>
+<div class="kpi"><div class="lbl">Trxs Ene</div><div class="val">${fmt0(pt.trxs_nov ?? 0)}</div></div>
           </div>
         `;
 
@@ -3685,6 +3903,58 @@ _____________________ Promedio: ${pt.promedio} _____________________`;
       panelATM.classList.remove("hidden");
       panelATM.classList.add("glow");
     }
+
+    function clearOfficeFocus(){
+      if(currentOfficeFocusMarker){
+        try{ map.removeLayer(currentOfficeFocusMarker); }catch(e){}
+        currentOfficeFocusMarker = null;
+      }
+      if(currentOfficeFocusCircle){
+        try{ map.removeLayer(currentOfficeFocusCircle); }catch(e){}
+        currentOfficeFocusCircle = null;
+      }
+    }
+
+    function createOfficeFocusIcon(){
+      return L.divIcon({
+        className: "office-focus-icon",
+        html: `<div class="office-focus-wrap"></div>`,
+        iconSize: [58,58],
+        iconAnchor: [29,29]
+      });
+    }
+
+    function focusOfficeOnMap(ofi){
+      if(!ofi) return;
+
+      const lat = Number(ofi.lat);
+      const lon = Number(ofi.lon);
+      if(!isFinite(lat) || !isFinite(lon)) return;
+
+      clearOfficeFocus();
+
+      // zoom suficiente para distinguir la oficina
+      map.setView([lat, lon], 18, { animate:true });
+
+      // halo/anillo encima de todo
+      currentOfficeFocusMarker = L.marker([lat, lon], {
+        icon: createOfficeFocusIcon(),
+        zIndexOffset: 10000
+      }).addTo(map);
+
+      currentOfficeFocusCircle = L.circle([lat, lon], {
+        radius: 28,
+        color: "#1464A5",
+        weight: 2,
+        fillColor: "#1464A5",
+        fillOpacity: 0.10,
+        opacity: 0.75
+      }).addTo(map);
+
+      // abre automáticamente el panel de detalle
+      showATMPanel(ofi);
+    }
+    
 
     btnVolver.addEventListener("click", () => {
       panelATM.classList.add("hidden");
@@ -3792,8 +4062,8 @@ _____________________ Promedio: ${pt.promedio} _____________________`;
         syncComercialVisibility();
 
         const zoom = map.getZoom();
-        const d = selDep.value, p = selProv.value, di = selDist.value;
-        const qs = `zoom=${zoom}&departamento=${encodeURIComponent(d)}&provincia=${encodeURIComponent(p)}&distrito=${encodeURIComponent(di)}`;
+        //const d = selDep.value, p = selProv.value, di = selDist.value;
+        const qs = `zoom=${zoom}`;
 
         if(!force && _nodosLastKey === qs){
           if(!map.hasLayer(nodosCluster)) nodosCluster.addTo(map);
@@ -4004,27 +4274,103 @@ _____________________ Promedio: ${pt.promedio} _____________________`;
     // ======================================================
     // COMBOS DEP/PROV/DIST/DIV
     // ======================================================
+    function _setSelectOptions(selectEl, placeholder, options, currentValue){
+      selectEl.innerHTML = `<option value="">${placeholder}</option>`;
+      options.forEach(v => {
+        selectEl.innerHTML += `<option value="${v}">${v}</option>`;
+      });
+
+      if(currentValue && options.includes(currentValue)){
+        selectEl.value = currentValue;
+      } else {
+        selectEl.value = "";
+      }
+    }
+
+    function _buildReverseMaps(){
+      const deptsByProv = {};
+      const provsByDist = {};
+      const deptsByDist = {};
+
+      Object.entries(PROV_BY_DEPT).forEach(([dep, provs]) => {
+        (provs || []).forEach(prov => {
+          if(!deptsByProv[prov]) deptsByProv[prov] = new Set();
+          deptsByProv[prov].add(dep);
+        });
+      });
+
+      Object.entries(DIST_BY_PROV).forEach(([prov, dists]) => {
+        (dists || []).forEach(dist => {
+          if(!provsByDist[dist]) provsByDist[dist] = new Set();
+          provsByDist[dist].add(prov);
+
+          if(!deptsByDist[dist]) deptsByDist[dist] = new Set();
+          const deps = deptsByProv[prov] ? Array.from(deptsByProv[prov]) : [];
+          deps.forEach(dep => deptsByDist[dist].add(dep));
+        });
+      });
+
+      return { deptsByProv, provsByDist, deptsByDist };
+    }
+
+    const GEO_REVERSE = _buildReverseMaps();
+
+    function _intersection(baseArr, allowedSet){
+      if(!allowedSet) return [...baseArr];
+      return baseArr.filter(v => allowedSet.has(v));
+    }
+
+    function refreshGeoSelectors(){
+      const depVal  = selDep.value;
+      const provVal = selProv.value;
+      const distVal = selDist.value;
+
+      let deps  = [...Object.keys(PROV_BY_DEPT)].sort();
+      let provs = [...ALL_PROVINCIAS];
+      let dists = [...ALL_DISTRITOS];
+
+      // si hay departamento elegido, reduce provincias y distritos compatibles
+      if(depVal){
+        provs = _intersection(provs, new Set(PROV_BY_DEPT[depVal] || []));
+
+        const distsForDep = new Set();
+        (PROV_BY_DEPT[depVal] || []).forEach(p => {
+          (DIST_BY_PROV[p] || []).forEach(d => distsForDep.add(d));
+        });
+        dists = _intersection(dists, distsForDep);
+      }
+
+      // si hay provincia elegida, reduce departamentos y distritos compatibles
+      if(provVal){
+        deps  = _intersection(deps, GEO_REVERSE.deptsByProv[provVal]);
+        dists = _intersection(dists, new Set(DIST_BY_PROV[provVal] || []));
+      }
+
+      // si hay distrito elegido, reduce departamentos y provincias compatibles
+      if(distVal){
+        deps  = _intersection(deps, GEO_REVERSE.deptsByDist[distVal]);
+        provs = _intersection(provs, GEO_REVERSE.provsByDist[distVal]);
+      }
+
+      deps.sort();
+      provs.sort();
+      dists.sort();
+
+      _setSelectOptions(selDep,  "-- Todos --", deps,  depVal);
+      _setSelectOptions(selProv, "-- Todas --", provs, provVal);
+      _setSelectOptions(selDist, "-- Todos --", dists, distVal);
+
+      updateDivisiones();
+    }
+
     function updateProvincias(){
-      const d = selDep.value;
-      selProv.innerHTML = '<option value="">-- Todas --</option>';
-      if(d && PROV_BY_DEPT[d]){
-        PROV_BY_DEPT[d].forEach(p => {
-          selProv.innerHTML += `<option value="${p}">${p}</option>`;
-        });
-      }
-      updateDistritos();
-      updateDivisiones();
+      refreshGeoSelectors();
     }
+
     function updateDistritos(){
-      const p = selProv.value;
-      selDist.innerHTML = '<option value="">-- Todos --</option>';
-      if(p && DIST_BY_PROV[p]){
-        DIST_BY_PROV[p].forEach(d => {
-          selDist.innerHTML += `<option value="${d}">${d}</option>`;
-        });
-      }
-      updateDivisiones();
+      refreshGeoSelectors();
     }
+
     function updateDivisiones(){
       const d = selDep.value;
       const p = selProv.value;
@@ -4046,11 +4392,62 @@ _____________________ Promedio: ${pt.promedio} _____________________`;
       ({{ divisiones|tojson }}).forEach(v => selDiv.innerHTML += `<option value="${v}">${v}</option>`);
     }
 
+    function ubicarOficinaSeleccionada(){
+      if(!selOficina) return;
+
+      const idx = selOficina.value;
+      if(idx === "" || idx === null || idx === undefined){
+        clearOfficeFocus();
+        return;
+      }
+
+      const baseOfi = OFICINAS_LOOKUP[Number(idx)];
+      if(!baseOfi) return;
+
+      const nombreSel = String(baseOfi.nombre || "").trim().toUpperCase();
+
+      // buscamos primero en la data real cargada en el mapa
+      let ofiReal = latestOficinasData.find(o =>
+        String(o.nombre || "").trim().toUpperCase() === nombreSel
+      );
+
+      // fallback por si aún no encuentra la oficina en latestOficinasData
+      if(!ofiReal){
+        ofiReal = {
+          nombre: baseOfi.nombre,
+          lat: baseOfi.lat,
+          lon: baseOfi.lon,
+          atm: "",
+          promedio: 0,
+          division: "",
+          tipo: "OFICINA",
+          ubicacion: "OFICINA",
+          departamento: baseOfi.departamento || "",
+          provincia: baseOfi.provincia || "",
+          distrito: baseOfi.distrito || "",
+          direccion: "",
+          estructura_as: 0,
+          estructura_ebp: 0,
+          estructura_ad: 0,
+          clientes_unicos: 0,
+          total_tickets: 0,
+          red_lines: 0,
+          performance_2025: "",
+          bai: 0,
+          margen_neto: 0,
+          tipo_canal: "OFICINA"
+        };
+      }
+
+      focusOfficeOnMap(ofiReal);
+    }
+
+
     // ======================================================
     // CLIENTES (RESUMEN)
     // ======================================================
     async function fetchResumenClientes(){
-      const d = selDep.value, p = selProv.value, di = selDist.value, seg = selSegmento.value;
+      const d = selDep.value, p = selProv.value, di = selDist.value, seg = "";
       const qs = `departamento=${encodeURIComponent(d)}&provincia=${encodeURIComponent(p)}&distrito=${encodeURIComponent(di)}&segmento=${encodeURIComponent(seg)}`;
       const res = await fetch(`/api/resumen_clientes?${qs}`);
       const js = await res.json();
@@ -4093,8 +4490,8 @@ async function fetchHeatCantClientes(force=false){
     try{ if(!map.hasLayer(heatCantClientes)) heatCantClientes.addTo(map); }catch(e){}
 
     const zoom = map.getZoom();
-    const d  = selDep.value, p = selProv.value, di = selDist.value;
-    const key = `${zoom}|${d}|${p}|${di}`;
+    // const d  = selDep.value, p = selProv.value, di = selDist.value;
+    const key = `${zoom}`;
 
     // ✅ si mismo key y NO force:
     // - si está cargando => solo re-add + redraw (no duplicar fetch)
@@ -4123,7 +4520,7 @@ async function fetchHeatCantClientes(force=false){
 
     _heatCantLoading = true;
 
-    const qs = `zoom=${zoom}&departamento=${encodeURIComponent(d)}&provincia=${encodeURIComponent(p)}&distrito=${encodeURIComponent(di)}`;
+    const qs = `zoom=${zoom}`;
     const res = await fetch(`/api/heatmap_cant_clientes?${qs}`, { signal: _heatCantAbort.signal });
     const data = await res.json();
 
@@ -4200,8 +4597,8 @@ async function fetchComerciosPts(force=false){
     syncDfComerciosPanelVisibility();
 
     // clave SIN zoom -> no parpadea con zoom
-    const d = selDep.value, p = selProv.value, di = selDist.value;
-    const key = `${d}|${p}|${di}`;
+    //const d = selDep.value, p = selProv.value, di = selDist.value;
+    const key = `ALL`;
 
     // ✅ si mismo key y ya hay layers cargados:
     // - si el cluster NO está en el mapa => re-add y listo
@@ -4228,8 +4625,7 @@ async function fetchComerciosPts(force=false){
 
     try{ comerciosCluster.clearLayers(); }catch(e){}
 
-    const qs = `departamento=${encodeURIComponent(d)}&provincia=${encodeURIComponent(p)}&distrito=${encodeURIComponent(di)}`;
-    const res = await fetch(`/api/comercios_points?${qs}`, { signal: _comPtsAbort.signal });
+    const res = await fetch(`/api/comercios_points`, { signal: _comPtsAbort.signal });
     const data = await res.json();
 
     let sumCant = 0;
@@ -4358,7 +4754,7 @@ if(!window.__BBVA_COMERCIOS_HOOKS__){
       infoBox.textContent = "...";
       panelATM.classList.add("hidden");
 
-      const res = await fetch(`/api/points?${qs}`);
+      const res = await fetch(`/api/points_integral?${qs}`);
       const data = await res.json();
       const pts = data.puntos || [];
 
@@ -4427,12 +4823,12 @@ heatGlow.setLatLngs(heatPts);
 
       if(TIPO_MAPA === "oficinas"){
         document.getElementById("resOfiTotal").textContent = data.total_oficinas || 0;
-        document.getElementById("resOfiSuma").textContent = Math.round(data.suma_total || 0);
-        document.getElementById("resOfiPromEAS").textContent = fmt2(data.prom_estructura_as);
-        document.getElementById("resOfiPromEBP").textContent = fmt2(data.prom_estructura_ebp);
-        document.getElementById("resOfiPromEAD").textContent = fmt2(data.prom_estructura_ad);
-        document.getElementById("resOfiPromCLI").textContent = fmt0(data.prom_clientes_unicos);
-        document.getElementById("resOfiPromTKT").textContent = fmt0(data.prom_total_tickets);
+        document.getElementById("resOfiSuma").textContent = fmt0(data.suma_trx);
+        document.getElementById("resOfiPromEAS").textContent = fmt0(data.suma_estructura_as);
+        document.getElementById("resOfiPromEBP").textContent = fmt0(data.suma_estructura_ebp);
+        document.getElementById("resOfiPromEAD").textContent = fmt0(data.suma_estructura_ad);
+        document.getElementById("resOfiPromCLI").textContent = fmt0(data.suma_clientes_unicos);
+        document.getElementById("resOfiPromTKT").textContent = fmt0(data.suma_total_tickets);
         document.getElementById("resOfiPromRED").textContent = fmtPct(data.prom_redlines);
       }
 
@@ -4527,8 +4923,12 @@ heatGlow.setLatLngs(heatPts);
       const res = await fetch(`/api/points_integral?${qs}`);
       const data = await res.json();
 
+      latestOficinasData = Array.isArray(data.oficinas) ? data.oficinas : [];
+
       markers.clearLayers();
       heat.setLatLngs([]);
+      heatGlow.setLatLngs([]);
+      clearOfficeFocus();
 
       let bounds = [];
       let shownCount = 0;
@@ -4636,7 +5036,7 @@ heatGlow.setLatLngs(heatPts);
       });
 
       document.getElementById("resAtmTotal").textContent = showATMs ? atm_total : 0;
-      document.getElementById("resAtmSuma").textContent  = showATMs ? Math.round(atm_suma) : 0;
+      document.getElementById("resAtmSuma").textContent  = showATMs ? fmt0(atm_suma) : "0";
       document.getElementById("resAtmEnOfi").textContent = showATMs ? atm_ofi : 0;
       document.getElementById("resAtmEnIsla").textContent= showATMs ? atm_isla : 0;
       document.getElementById("resAtmDisp").textContent  = showATMs ? atm_disp : 0;
@@ -4648,15 +5048,15 @@ heatGlow.setLatLngs(heatPts);
       const ofi_suma  = (data.suma_oficinas || 0);
 
       document.getElementById("resOfiTotal").textContent = showOfi ? ofi_total : 0;
-      document.getElementById("resOfiSuma").textContent  = showOfi ? Math.round(ofi_suma) : 0;
+      document.getElementById("resOfiSuma").textContent  = showOfi ? fmt0(ofi_suma) : "0";
 
-      document.getElementById("resOfiPromEAS").textContent = showOfi ? fmt2(data.prom_ofi_estructura_as) : "0.00";
-      document.getElementById("resOfiPromEBP").textContent = showOfi ? fmt2(data.prom_ofi_estructura_ebp) : "0.00";
-      document.getElementById("resOfiPromEAD").textContent = showOfi ? fmt2(data.prom_ofi_estructura_ad) : "0.00";
-      document.getElementById("resOfiPromCLI").textContent = showOfi ? fmt0(data.prom_ofi_clientes_unicos) : "0";
-      document.getElementById("resOfiPromTKT").textContent = showOfi ? fmt0(data.prom_ofi_total_tickets) : "0";
+      document.getElementById("resOfiPromEAS").textContent = showOfi ? fmt0(data.suma_ofi_estructura_as) : "0.00";
+      document.getElementById("resOfiPromEBP").textContent = showOfi ? fmt0(data.suma_ofi_estructura_ebp) : "0.00";
+      document.getElementById("resOfiPromEAD").textContent = showOfi ? fmt0(data.suma_ofi_estructura_ad) : "0.00";
+      document.getElementById("resOfiPromCLI").textContent = showOfi ? fmt0(data.suma_ofi_clientes_unicos) : "0";
+      document.getElementById("resOfiPromTKT").textContent = showOfi ? fmt0(data.suma_ofi_total_tickets) : "0";
       document.getElementById("resOfiPromRED").textContent = showOfi ? fmtPct(data.prom_ofi_redlines) : "0.00%";
-
+      
       // Agentes resumen (integral)
       const ag_total = (data.total_agentes || 0);
       const ag_suma  = (data.suma_agentes || 0);
@@ -4672,7 +5072,7 @@ heatGlow.setLatLngs(heatPts);
       });
 
       document.getElementById("resAgTotal").textContent = showAg ? ag_total : 0;
-      document.getElementById("resAgSuma").textContent  = showAg ? Math.round(ag_suma) : 0;
+      document.getElementById("resAgSuma").textContent   = showAg  ? fmt0(ag_suma)  : "0";
       document.getElementById("resAgA1").textContent    = showAg ? agA1 : 0;
       document.getElementById("resAgA2").textContent    = showAg ? agA2 : 0;
       document.getElementById("resAgA3").textContent    = showAg ? agA3 : 0;
@@ -4734,20 +5134,27 @@ heatGlow.setLatLngs(heatPts);
     }
 
     selDep.addEventListener("change", () => {
-      updateProvincias();
+      refreshGeoSelectors();
       scheduleReload(true);
     });
+
     selProv.addEventListener("change", () => {
-      updateDistritos();
+      refreshGeoSelectors();
       scheduleReload(true);
     });
+
     selDist.addEventListener("change", () => {
-      updateDivisiones();
+      refreshGeoSelectors();
       scheduleReload(true);
     });
+
     selDiv.addEventListener("change", () => {
       scheduleReload(true);
     });
+
+    if(selOficina){
+      selOficina.addEventListener("change", ubicarOficinaSeleccionada);
+    }
 
     if(selTipoATM) selTipoATM.addEventListener("change", ()=>scheduleReload(true));
     if(selUbicATM) selUbicATM.addEventListener("change", ()=>scheduleReload(true));
