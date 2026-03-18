@@ -1251,7 +1251,7 @@ def healthz():
 app.secret_key = os.getenv("SECRET_KEY", "fallback_local")
 
 APP_USER = os.getenv("APP_USERNAME", "adminbbva")
-APP_PASS = os.getenv("APP_PASSWORD", "canales1030")
+APP_PASS = os.getenv("APP_PASSWORD", "canales1020")
 
 @app.after_request
 def add_header(resp):
