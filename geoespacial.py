@@ -478,6 +478,146 @@ if excel_comercios:
 else:
     print("⚠ No existe Excel de comercios (cant_clientes) — heatmap cantidad clientes desactivado.")
 
+
+# ============================================================
+# 2B. CARGAR BASE DE EMPRESAS NÓMINA ✅
+#   - Nueva capa comercial / empresarial
+#   - No rompe si el archivo no existe
+# ============================================================
+excel_empresas = _pick_first_existing([
+    os.path.join(BASE_DIR, "data", "BASE_EMPRESAS_NOMINAS.xlsx"),
+    os.path.join(BASE_DIR, "data", "BASE_EMPRESAS_NOMINAS.xls"),
+    "/mnt/data/BASE_EMPRESAS_NOMINAS.xlsx",
+    "/mnt/data/BASE_EMPRESAS_NOMINAS.xls",
+])
+
+df_empresas = pd.DataFrame(columns=[
+    "PERSONAL_ID","CUSTOMER_ID","NOMBRE_COMPLETO","OPERAREA_DESC","CIIU_AGRUPADO",
+    "BBVA_BALANCE_AMOUNT","SYSTEM_BALANCE_AMOUNT","STOCK","TRABAJADORES",
+    "DEPARTAMENTO","PROVINCIA","DISTRITO","LATITUD","LONGITUD",
+    "PENETRACION_NOMINA","SHARE_WALLET"
+])
+
+if excel_empresas:
+    try:
+        raw_e = pd.read_excel(excel_empresas)
+        norm_map_e = {normalize_col(c): c for c in raw_e.columns}
+
+        def find_col_e(keys):
+            for norm, orig in norm_map_e.items():
+                for k in keys:
+                    if normalize_col(k) in norm:
+                        return orig
+            return None
+
+        COLE_PID   = find_col_e(["personal_id", "personal id", "ruc"]) or "personal_id"
+        COLE_CID   = find_col_e(["customer_id", "customer id"]) or "customer_id"
+        COLE_NAME  = find_col_e(["Nombre_completo", "Nombre completo", "razon social", "nombre"]) or "Nombre_completo"
+        COLE_AREA  = find_col_e(["operarea_desc", "operarea desc", "area", "área"]) or "operarea_desc"
+        COLE_CIIU  = find_col_e(["ciiu_agrupado", "ciiu agrupado", "ciiu"]) or "ciiu_agrupado"
+        COLE_BBVA  = find_col_e(["bbva_balance_amount", "bbva balance amount"]) or "bbva_balance_amount"
+        COLE_SYS   = find_col_e(["system_balance_amount", "system balance amount"]) or "system_balance_amount"
+        COLE_STOCK = find_col_e(["stock"]) or "STOCK"
+        COLE_TRAB  = find_col_e(["trabajadores", "empleados", "workers"]) or "trabajadores"
+        COLE_DEP   = find_col_e(["departamento"]) or "Departamento"
+        COLE_PROV  = find_col_e(["provincia"]) or "Provincia"
+        COLE_DIST  = find_col_e(["distrito"]) or "Distrito"
+        COLE_LAT   = find_col_e(["latitud", "lat"]) or "latitud"
+        COLE_LON   = find_col_e(["longitud", "lon"]) or "longitud"
+
+        for c in [COLE_PID, COLE_CID, COLE_NAME, COLE_AREA, COLE_CIIU, COLE_BBVA, COLE_SYS,
+                  COLE_STOCK, COLE_TRAB, COLE_DEP, COLE_PROV, COLE_DIST, COLE_LAT, COLE_LON]:
+            if c not in raw_e.columns:
+                raw_e[c] = ""
+
+        raw_e[COLE_DEP]  = raw_e[COLE_DEP].apply(clean_str)
+        raw_e[COLE_PROV] = raw_e[COLE_PROV].apply(clean_str)
+        raw_e[COLE_DIST] = raw_e[COLE_DIST].apply(clean_str)
+
+        raw_e[COLE_LAT] = (
+            raw_e[COLE_LAT].astype(str)
+            .str.replace(",", ".", regex=False)
+            .str.replace(r"[^\d\.\-]", "", regex=True)
+            .replace("", np.nan)
+            .astype(float)
+        )
+        raw_e[COLE_LON] = (
+            raw_e[COLE_LON].astype(str)
+            .str.replace(",", ".", regex=False)
+            .str.replace(r"[^\d\.\-]", "", regex=True)
+            .replace("", np.nan)
+            .astype(float)
+        )
+
+        for c in [COLE_BBVA, COLE_SYS, COLE_STOCK, COLE_TRAB]:
+            raw_e[c] = pd.to_numeric(
+                raw_e[c].astype(str).str.replace(",", "", regex=False),
+                errors="coerce"
+            ).fillna(0.0)
+
+        df_empresas = raw_e.dropna(subset=[COLE_LAT, COLE_LON]).copy()
+
+        df_empresas = df_empresas.rename(columns={
+            COLE_PID:   "PERSONAL_ID",
+            COLE_CID:   "CUSTOMER_ID",
+            COLE_NAME:  "NOMBRE_COMPLETO",
+            COLE_AREA:  "OPERAREA_DESC",
+            COLE_CIIU:  "CIIU_AGRUPADO",
+            COLE_BBVA:  "BBVA_BALANCE_AMOUNT",
+            COLE_SYS:   "SYSTEM_BALANCE_AMOUNT",
+            COLE_STOCK: "STOCK",
+            COLE_TRAB:  "TRABAJADORES",
+            COLE_DEP:   "DEPARTAMENTO",
+            COLE_PROV:  "PROVINCIA",
+            COLE_DIST:  "DISTRITO",
+            COLE_LAT:   "LATITUD",
+            COLE_LON:   "LONGITUD",
+        })
+
+        df_empresas["NOMBRE_COMPLETO"] = df_empresas["NOMBRE_COMPLETO"].astype(str).fillna("").str.strip()
+        df_empresas["OPERAREA_DESC"]   = df_empresas["OPERAREA_DESC"].astype(str).fillna("").str.strip()
+        df_empresas["CIIU_AGRUPADO"]   = df_empresas["CIIU_AGRUPADO"].astype(str).fillna("").str.strip()
+
+        df_empresas["PENETRACION_NOMINA"] = np.where(
+            df_empresas["TRABAJADORES"] > 0,
+            df_empresas["STOCK"] / df_empresas["TRABAJADORES"],
+            0.0
+        )
+        df_empresas["SHARE_WALLET"] = np.where(
+            df_empresas["SYSTEM_BALANCE_AMOUNT"] > 0,
+            df_empresas["BBVA_BALANCE_AMOUNT"] / df_empresas["SYSTEM_BALANCE_AMOUNT"],
+            0.0
+        )
+
+        df_empresas["PENETRACION_NOMINA"] = df_empresas["PENETRACION_NOMINA"].clip(lower=0, upper=1)
+        df_empresas["SHARE_WALLET"] = df_empresas["SHARE_WALLET"].clip(lower=0, upper=1)
+
+        print(f"✅ Empresas nómina cargadas: {len(df_empresas)} filas ({excel_empresas})")
+    except Exception as e:
+        print("⚠ No se pudo cargar BASE_EMPRESAS_NOMINAS:", e)
+else:
+    print("⚠ No existe BASE_EMPRESAS_NOMINAS — capa empresas desactivada.")
+
+def _filter_empresas():
+    if df_empresas is None or df_empresas.empty:
+        return pd.DataFrame()
+
+    dpto = request.args.get("departamento", "").upper().strip()
+    prov = request.args.get("provincia", "").upper().strip()
+    dist = request.args.get("distrito", "").upper().strip()
+
+    dff = df_empresas.copy()
+
+    if dpto:
+        dff = dff[dff["DEPARTAMENTO"].astype(str).str.upper() == dpto]
+    if prov:
+        dff = dff[dff["PROVINCIA"].astype(str).str.upper() == prov]
+    if dist:
+        dff = dff[dff["DISTRITO"].astype(str).str.upper() == dist]
+
+    return dff
+
+
 # ============================================================
 # 2B. CARGAR EXCEL DE AGENTES
 # ============================================================
@@ -1110,11 +1250,37 @@ def api_zonas():
 @app.route("/api/nodos")
 @login_required
 def api_nodos():
-    # ✅ Ya NO se filtra por Departamento / Provincia / Distrito
     if df_nodos is None or df_nodos.empty:
         return jsonify({"total": 0, "resumen": {}, "nodos": []})
 
+    dpto = request.args.get("departamento", "").strip().upper()
+    prov = request.args.get("provincia", "").strip().upper()
+    dist = request.args.get("distrito", "").strip().upper()
+
     dff = df_nodos.copy()
+
+    if dpto:
+        dff = dff[dff["DEPARTAMENTO"].astype(str).str.strip().str.upper() == dpto]
+    if prov:
+        dff = dff[dff["PROVINCIA"].astype(str).str.strip().str.upper() == prov]
+    if dist:
+        dff = dff[dff["DISTRITO"].astype(str).str.strip().str.upper() == dist]
+
+    if dff.empty:
+        return jsonify({"total": 0, "resumen": {
+            "total": 0,
+            "hospitales": 0,
+            "clinicas": 0,
+            "centros_comerciales": 0,
+            "plaza_vea": 0,
+            "sodimac": 0,
+            "metro": 0,
+            "tottus": 0,
+            "wong": 0,
+            "universidades": 0,
+            "mercados": 0,
+            "otros": 0,
+        }, "nodos": []})
 
     resumen = {
         "total": 0,
@@ -1183,6 +1349,163 @@ def api_nodos():
         })
 
     return jsonify({"total": len(nodos), "resumen": resumen, "nodos": nodos})
+
+
+@app.route("/api/empresas_nominas_points")
+@login_required
+def api_empresas_nominas_points():
+    if df_empresas is None or df_empresas.empty:
+        return jsonify([])
+
+    zoom_str = request.args.get("zoom", "10")
+    try:
+        zoom = int(float(zoom_str))
+    except:
+        zoom = 10
+
+    dff = _filter_empresas()
+    if dff.empty:
+        return jsonify([])
+
+    if zoom <= 5:
+        sample_size = 1200
+    elif zoom <= 9:
+        sample_size = 4000
+    elif zoom <= 13:
+        sample_size = 9000
+    else:
+        sample_size = 15000
+
+    sample_size = min(sample_size, len(dff))
+    df_sample = dff if sample_size >= len(dff) else dff.sample(sample_size, replace=False, random_state=7)
+
+    out = []
+    for _, r in df_sample.iterrows():
+        out.append({
+            "personal_id": str(r.get("PERSONAL_ID", "")).strip(),
+            "customer_id": str(r.get("CUSTOMER_ID", "")).strip(),
+            "nombre_completo": str(r.get("NOMBRE_COMPLETO", "")).strip(),
+            "operarea_desc": str(r.get("OPERAREA_DESC", "")).strip(),
+            "ciiu_agrupado": str(r.get("CIIU_AGRUPADO", "")).strip(),
+            "bbva_balance_amount": float(r.get("BBVA_BALANCE_AMOUNT", 0.0) or 0.0),
+            "system_balance_amount": float(r.get("SYSTEM_BALANCE_AMOUNT", 0.0) or 0.0),
+            "stock": float(r.get("STOCK", 0.0) or 0.0),
+            "trabajadores": float(r.get("TRABAJADORES", 0.0) or 0.0),
+            "penetracion_nomina": float(r.get("PENETRACION_NOMINA", 0.0) or 0.0),
+            "share_wallet": float(r.get("SHARE_WALLET", 0.0) or 0.0),
+            "departamento": str(r.get("DEPARTAMENTO", "")).strip(),
+            "provincia": str(r.get("PROVINCIA", "")).strip(),
+            "distrito": str(r.get("DISTRITO", "")).strip(),
+            "lat": float(r.get("LATITUD", 0.0)),
+            "lon": float(r.get("LONGITUD", 0.0)),
+        })
+    return jsonify(out)
+
+@app.route("/api/empresas_nominas_heat")
+@login_required
+def api_empresas_nominas_heat():
+    if df_empresas is None or df_empresas.empty:
+        return jsonify([])
+
+    dff = _filter_empresas().copy()
+    if dff.empty:
+        return jsonify([])
+
+    # =========================================================
+    # ✅ Filtrar por viewport visible del mapa (si viene)
+    # south, west, north, east
+    # =========================================================
+    try:
+        south = float(request.args.get("south", "nan"))
+        west  = float(request.args.get("west", "nan"))
+        north = float(request.args.get("north", "nan"))
+        east  = float(request.args.get("east", "nan"))
+    except Exception:
+        south = west = north = east = float("nan")
+
+    if all(pd.notna(v) for v in [south, west, north, east]):
+        # caso normal
+        if west <= east:
+            dff = dff[
+                (pd.to_numeric(dff["LATITUD"], errors="coerce").between(south, north)) &
+                (pd.to_numeric(dff["LONGITUD"], errors="coerce").between(west, east))
+            ].copy()
+        else:
+            # por si alguna vez el bbox cruza antimeridiano
+            dff = dff[
+                (pd.to_numeric(dff["LATITUD"], errors="coerce").between(south, north)) &
+                (
+                    (pd.to_numeric(dff["LONGITUD"], errors="coerce") >= west) |
+                    (pd.to_numeric(dff["LONGITUD"], errors="coerce") <= east)
+                )
+            ].copy()
+
+    if dff.empty:
+        return jsonify([])
+
+    out = []
+    for _, r in dff.iterrows():
+        try:
+            lat = float(r.get("LATITUD", 0.0))
+            lon = float(r.get("LONGITUD", 0.0))
+        except Exception:
+            continue
+
+        if not (pd.notna(lat) and pd.notna(lon)):
+            continue
+
+        out.append({
+            "lat": lat,
+            "lon": lon,
+            "trabajadores": float(r.get("TRABAJADORES", 0.0) or 0.0),
+            "stock": float(r.get("STOCK", 0.0) or 0.0),
+        })
+
+    return jsonify(out)
+
+
+@app.route("/api/resumen_empresas_nominas")
+@login_required
+def api_resumen_empresas_nominas():
+    if df_empresas is None or df_empresas.empty:
+        return jsonify({
+            "total_empresas": 0, "total_trabajadores": 0, "total_stock": 0,
+            "penetracion_prom": 0, "share_wallet_prom": 0,
+            "saldo_bbva_total": 0, "saldo_system_total": 0,
+            "top_area": "—", "top_sector": "—"
+        })
+
+    dff = _filter_empresas()
+    if dff.empty:
+        return jsonify({
+            "total_empresas": 0, "total_trabajadores": 0, "total_stock": 0,
+            "penetracion_prom": 0, "share_wallet_prom": 0,
+            "saldo_bbva_total": 0, "saldo_system_total": 0,
+            "top_area": "—", "top_sector": "—"
+        })
+
+    total_empresas = len(dff)
+    total_trabajadores = float(dff["TRABAJADORES"].sum())
+    total_stock = float(dff["STOCK"].sum())
+    penetracion_prom = float((total_stock / total_trabajadores) if total_trabajadores > 0 else 0.0)
+    saldo_bbva_total = float(dff["BBVA_BALANCE_AMOUNT"].sum())
+    saldo_system_total = float(dff["SYSTEM_BALANCE_AMOUNT"].sum())
+    share_wallet_prom = float((saldo_bbva_total / saldo_system_total) if saldo_system_total > 0 else 0.0)
+
+    area_mode = dff["OPERAREA_DESC"].replace("", np.nan).dropna()
+    sector_mode = dff["CIIU_AGRUPADO"].replace("", np.nan).dropna()
+
+    return jsonify({
+        "total_empresas": int(total_empresas),
+        "total_trabajadores": round(total_trabajadores, 0),
+        "total_stock": round(total_stock, 0),
+        "penetracion_prom": round(100 * penetracion_prom, 1),
+        "share_wallet_prom": round(100 * share_wallet_prom, 1),
+        "saldo_bbva_total": round(saldo_bbva_total, 2),
+        "saldo_system_total": round(saldo_system_total, 2),
+        "top_area": str(area_mode.mode().iloc[0]) if not area_mode.empty else "—",
+        "top_sector": str(sector_mode.mode().iloc[0]) if not sector_mode.empty else "—",
+    })
 
 # ============================================================
 # 6. RUTAS MAPA
@@ -2350,6 +2673,23 @@ label:has(#chkHeatClientes){
 #panelClientes{
   display:none !important;
 }
+#empNomSector,
+#empNomArea{
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  word-break: break-word;
+}
+
+#panelEmpresasNomina .metric-mini .m-value{
+  font-size: 22px;
+  line-height: 1.15;
+}
+
+#panelEmpresasNomina .metric-mini .m-label{
+  min-height: 30px;
+}
   </style>
 </head>
 
@@ -2444,6 +2784,8 @@ label:has(#chkHeatClientes){
       <label style="margin-left:16px;"><input type="checkbox" id="chkHeatCantClientes"> Heatmap Cantidad de Clientes</label>
       <label style="margin-left:16px;"><input type="checkbox" id="chkComerciosPts"> Comercios Usados por Clientes</label>
       <label style="margin-left:16px;"><input type="checkbox" id="chkReco"> Recomendaciones</label>
+      <label style="margin-left:16px;"><input type="checkbox" id="chkEmpresasNomina"> Empresas Nómina</label>
+      <label style="margin-left:16px;"><input type="checkbox" id="chkHeatEmpresasNomina"> Heatmap Oportunidad Empresas</label>
 
       <!-- ✅ COMERCIAL / NODOS -->
       <label style="margin-left:16px;"><input type="checkbox" id="chkNodos"> Puntos Comerciales(Tráfico Personas)</label>
@@ -2512,6 +2854,74 @@ label:has(#chkHeatClientes){
           </div>
         </div>
       </div>
+
+
+      <!-- ✅ PANEL EMPRESAS NÓMINA -->
+<div id="panelEmpresasNomina" class="side-card hidden">
+  <div class="dash-panel">
+    <div>
+      <div class="side-title">🏢 Empresas Nómina</div>
+      <div class="muted">Se actualiza con filtros y solo cuenta si “Empresas Nómina” o “Heatmap Oportunidad Empresas” está activado.</div>
+    </div>
+
+    <div class="dash-top">
+      <div class="dash-kpi">
+        <div class="k-label">Empresas</div>
+        <div class="k-value" id="empNomTotal">0</div>
+      </div>
+      <div class="dash-kpi">
+        <div class="k-label">Trabajadores</div>
+        <div class="k-value" id="empNomTrab">0</div>
+      </div>
+    </div>
+
+    <div class="dash-section">
+      <div class="dash-section-title">Penetración BBVA</div>
+      <div class="dash-grid-3">
+        <div class="metric-mini">
+          <div class="m-label">Stock nómina</div>
+          <div class="m-value" id="empNomStock">0</div>
+        </div>
+        <div class="metric-mini">
+          <div class="m-label">Penetración</div>
+          <div class="m-value" id="empNomPen">0%</div>
+        </div>
+        <div class="metric-mini">
+          <div class="m-label">Share wallet</div>
+          <div class="m-value" id="empNomShare">0%</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="dash-section">
+      <div class="dash-section-title">Dominancia</div>
+      <div class="dash-grid-2">
+        <div class="metric-mini">
+          <div class="m-label">Área dominante</div>
+          <div class="m-value" id="empNomArea">—</div>
+        </div>
+        <div class="metric-mini">
+          <div class="m-label">Sector dominante</div>
+          <div class="m-value" id="empNomSector">—</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="dash-section">
+      <div class="dash-section-title">Saldos</div>
+      <div class="dash-grid-2">
+        <div class="metric-mini">
+          <div class="m-label">Saldo BBVA</div>
+          <div class="m-value" id="empNomSaldoBbva">0</div>
+        </div>
+        <div class="metric-mini">
+          <div class="m-label">Saldo sistema</div>
+          <div class="m-value" id="empNomSaldoSystem">0</div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
 
       <!-- ✅ PANEL COMERCIAL (POIs) -->
       <div id="panelComercial" class="side-card hidden">
@@ -2758,6 +3168,8 @@ label:has(#chkHeatClientes){
   <script src="https://unpkg.com/leaflet.markercluster@1.5.3/dist/leaflet.markercluster.js"></script>
   <script src="https://unpkg.com/leaflet.heat/dist/leaflet-heat.js"></script>
 
+  
+
   <script>
     // ======================================================
     // DATA INICIAL (Jinja)
@@ -2958,6 +3370,9 @@ map.getPane('heatClientesPane').style.zIndex = 386;
 map.createPane('heatCantPane');
 map.getPane('heatCantPane').style.zIndex = 387;
 
+map.createPane('heatEmpresasPane');
+map.getPane('heatEmpresasPane').style.zIndex = 388;
+
 // ✅ Pane exclusivo para HALO (glow) por encima de los íconos
 map.createPane('heatGlowPane');
 map.getPane('heatGlowPane').style.zIndex = 620;          // > markerPane (600)
@@ -3047,18 +3462,25 @@ applyHeatBaseStyle();
 
   const pCant = map.getPane("heatCantPane");
   if(pCant){
-    // si quieres que el heatmap de cant_clientes use el mismo glow:
     pCant.style.filter = HEAT_PANE_FILTER;
     pCant.style.opacity = String(HEAT_PANE_OPACITY);
   }
 
-
-    const pGlow = map.getPane("heatGlowPane");
+  const pGlow = map.getPane("heatGlowPane");
   if(pGlow){
     pGlow.style.filter = HEAT_PANE_FILTER;
     pGlow.style.opacity = String(HEAT_PANE_OPACITY);
   }
 
+  // ✅ NUEVO: estilo visual para heatmap de Empresas
+  const pEmp = map.getPane("heatEmpresasPane");
+  if(pEmp){
+    pEmp.style.filter =
+      "saturate(1.20) brightness(1.08) " +
+      "drop-shadow(0 0 10px rgba(147,51,234,0.35)) " +
+      "drop-shadow(0 0 18px rgba(107,33,168,0.25))";
+    pEmp.style.opacity = "0.98";
+  }
 })();
     const markersReco = L.layerGroup();
 
@@ -3303,8 +3725,11 @@ if(chkHeat) chkHeat.addEventListener("change", setHeatOnClass);
 
     const chkHeatCantClientes = document.getElementById("chkHeatCantClientes");
     const chkComerciosPts = document.getElementById("chkComerciosPts");
+    const chkEmpresasNomina = document.getElementById("chkEmpresasNomina");
+    const chkHeatEmpresasNomina = document.getElementById("chkHeatEmpresasNomina");
 
     const panelClientes = document.getElementById("panelClientes");
+    const panelEmpresasNomina = document.getElementById("panelEmpresasNomina");
     const infoBox = document.getElementById("infoCount");
 
     const selTipoATM = document.getElementById("selTipoATM");
@@ -3599,6 +4024,57 @@ map.on("zoomend moveend", () => {
   }
 });
 
+
+if(chkEmpresasNomina){
+  chkEmpresasNomina.addEventListener("change", async () => {
+    syncEmpresasNominaVisibility();
+    if(chkEmpresasNomina.checked){
+      await fetchEmpresasNomina(true);
+    }else{
+      _counts.empresas = 0;
+      refreshInfoCount();
+      if(chkHeatEmpresasNomina?.checked) await fetchResumenEmpresasNomina();
+    }
+  });
+}
+
+if(chkHeatEmpresasNomina){
+  chkHeatEmpresasNomina.addEventListener("change", async () => {
+    syncEmpresasNominaVisibility();
+    if(chkHeatEmpresasNomina.checked){
+      await fetchHeatEmpresasNomina();
+    }else{
+      try{ if(map.hasLayer(heatEmpresasNomina)) map.removeLayer(heatEmpresasNomina); }catch(e){}
+      try{ heatEmpresasNomina.setLatLngs([]); }catch(e){}
+      if(!(chkEmpresasNomina?.checked)){
+        setEmpresasNominaResumen(null);
+      }else{
+        await fetchResumenEmpresasNomina();
+      }
+    }
+  });
+}
+
+[selDep, selProv, selDist].forEach(el => {
+  if(!el) return;
+  el.addEventListener("change", async () => {
+    if(chkEmpresasNomina?.checked) await fetchEmpresasNomina(true);
+    if(chkHeatEmpresasNomina?.checked) await fetchHeatEmpresasNomina();
+    if(chkEmpresasNomina?.checked || chkHeatEmpresasNomina?.checked){
+      await fetchResumenEmpresasNomina();
+    }
+  });
+});
+
+map.on("zoomend", () => {
+  if(chkEmpresasNomina?.checked) fetchEmpresasNomina(false);
+  if(chkHeatEmpresasNomina?.checked) fetchHeatEmpresasNomina();
+});
+
+map.on("moveend", () => {
+  if(chkHeatEmpresasNomina?.checked) fetchHeatEmpresasNomina();
+});
+
 refreshGeoSelectors();
 // por si el checkbox arranca marcado (cache del navegador)
 map.whenReady(() => {
@@ -3611,13 +4087,14 @@ map.whenReady(() => {
     // ======================================================
     // ✅ CONTADORES (para "Mostrando")
     // ======================================================
-    const _counts = { base: 0, nodos: 0, comercios: 0 };
+    const _counts = { base: 0, nodos: 0, comercios: 0, empresas: 0 };
 
     function refreshInfoCount(){
       let total = 0;
       total += Number(_counts.base || 0);
       if(chkNodos && chkNodos.checked) total += Number(_counts.nodos || 0);
       if(chkComerciosPts && chkComerciosPts.checked) total += Number(_counts.comercios || 0);
+      if(chkEmpresasNomina && chkEmpresasNomina.checked) total += Number(_counts.empresas || 0);
       infoBox.textContent = String(total);
     }
 
@@ -3971,7 +4448,296 @@ _____________________ Promedio: ${pt.promedio} _____________________`;
     // ======================================================
     // ✅ COMERCIAL/NODOS — pin rojo + popup globo + panel conteo
     // ======================================================
-  const nodosCluster = L.markerClusterGroup({
+  
+// ======================================================
+// ✅ EMPRESAS NÓMINA — puntos + heatmap + panel resumen
+// ======================================================
+const HEAT_EMPRESAS_OPTS = {
+  pane: "heatEmpresasPane",
+  radius: 58,
+  blur: 36,
+  maxZoom: 18,
+  minOpacity: 0.58,
+  max: 1.0,
+  gradient: {
+    0.00: "rgba(0,0,0,0)",
+    0.08: "#F3E8FF",
+    0.22: "#E9D5FF",
+    0.42: "#D8B4FE",
+    0.65: "#C084FC",
+    0.84: "#9333EA",
+    1.00: "#6B21A8"
+  }
+};
+
+const heatEmpresasNomina = L.heatLayer([], HEAT_EMPRESAS_OPTS);
+const empresasCluster = L.markerClusterGroup({
+  chunkedLoading: true,
+  showCoverageOnHover: false,
+  spiderfyOnMaxZoom: true,
+  disableClusteringAtZoom: 18,
+  maxClusterRadius: (zoom) => (zoom >= 15 ? 110 : 90),
+  iconCreateFunction: function(cluster){
+    const n = cluster.getChildCount();
+    return L.divIcon({
+      className: "emp-cluster-icon",
+      html: `<div style="background:#6B46C1;color:#fff;border:3px solid rgba(255,255,255,.95);width:44px;height:44px;border-radius:999px;display:flex;align-items:center;justify-content:center;font-weight:800;box-shadow:0 8px 18px rgba(107,70,193,.35);">${n}</div>`,
+      iconSize: [44,44],
+      iconAnchor: [22,22]
+    });
+  }
+});
+
+let _empresasAbort = null;
+let _empresasHeatAbort = null;
+
+function empPinIcon(){
+  const svg = `
+    <div style="width:34px;height:34px;display:flex;align-items:center;justify-content:center;filter:drop-shadow(0 4px 10px rgba(107,70,193,.35));">
+      <svg viewBox="0 0 24 24" width="34" height="34" fill="#6B46C1" stroke="#ffffff" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M12 22s7-4.5 7-12a7 7 0 0 0-14 0c0 7.5 7 12 7 12z"></path>
+        <path d="M9 12h6M9 9h6M9 15h6"></path>
+      </svg>
+    </div>`;
+  return L.divIcon({
+    className: "emp-pin-icon",
+    html: svg,
+    iconSize: [34,34],
+    iconAnchor: [17,34],
+    popupAnchor: [0,-28]
+  });
+}
+
+function fmtMoneyShort(v){
+  const n = Number(v || 0);
+  if(!isFinite(n)) return "0";
+  return new Intl.NumberFormat("es-PE", { maximumFractionDigits: 0 }).format(Math.round(n));
+}
+
+function empBalloonHtml(r){
+  const nombre = escHtml(r.nombre_completo || "—");
+  const area = escHtml(r.operarea_desc || "—");
+  const ciiu = escHtml(r.ciiu_agrupado || "—");
+  const trab = fmtMoneyShort(r.trabajadores || 0);
+  const stock = fmtMoneyShort(r.stock || 0);
+  const pen = Number(r.penetracion_nomina || 0) * 100;
+  const sw = Number(r.share_wallet || 0) * 100;
+  return `
+    <div class="com-balloon">
+      <div style="font-size:14px; margin-bottom:6px;">🏢 Empresa Nómina</div>
+      <div><b>Empresa:</b> ${nombre}</div>
+      <div><b>Área:</b> ${area}</div>
+      <div><b>Sector:</b> ${ciiu}</div>
+      <div><b>Trabajadores:</b> ${trab}</div>
+      <div><b>Stock BBVA:</b> ${stock}</div>
+      <div><b>Penetración:</b> ${pen.toFixed(1)}%</div>
+      <div><b>Share wallet:</b> ${sw.toFixed(1)}%</div>
+    </div>`;
+}
+
+function syncEmpresasNominaVisibility(){
+  const showPts = !!(chkEmpresasNomina && chkEmpresasNomina.checked);
+  const showHeat = !!(chkHeatEmpresasNomina && chkHeatEmpresasNomina.checked);
+  const showPanel = showPts || showHeat;
+
+  if(panelEmpresasNomina) panelEmpresasNomina.classList.toggle("hidden", !showPanel);
+
+  if(!showPts){
+    try{ if(map.hasLayer(empresasCluster)) map.removeLayer(empresasCluster); }catch(e){}
+    try{ empresasCluster.clearLayers(); }catch(e){}
+    _counts.empresas = 0;
+  }else{
+    if(!map.hasLayer(empresasCluster)) empresasCluster.addTo(map);
+  }
+
+  if(!showHeat){
+    try{ if(map.hasLayer(heatEmpresasNomina)) map.removeLayer(heatEmpresasNomina); }catch(e){}
+    try{ heatEmpresasNomina.setLatLngs([]); }catch(e){}
+  }else{
+    if(!map.hasLayer(heatEmpresasNomina)) heatEmpresasNomina.addTo(map);
+  }
+
+  if(!showPanel){
+    setEmpresasNominaResumen(null);
+    refreshInfoCount();
+  }
+}
+
+function setEmpresasNominaResumen(data){
+  const d = data || {};
+  const z = (id, val)=>{ const el = document.getElementById(id); if(el) el.textContent = val; };
+  z("empNomTotal", fmtMoneyShort(d.total_empresas || 0));
+  z("empNomTrab", fmtMoneyShort(d.total_trabajadores || 0));
+  z("empNomStock", fmtMoneyShort(d.total_stock || 0));
+  z("empNomPen", `${Number(d.penetracion_prom || 0).toFixed(1)}%`);
+  z("empNomShare", `${Number(d.share_wallet_prom || 0).toFixed(1)}%`);
+  z("empNomArea", d.top_area || "—");
+  z("empNomSector", d.top_sector || "—");
+  z("empNomSaldoBbva", fmtMoneyShort(d.saldo_bbva_total || 0));
+  z("empNomSaldoSystem", fmtMoneyShort(d.saldo_system_total || 0));
+}
+
+async function fetchResumenEmpresasNomina(){
+  if(!(chkEmpresasNomina?.checked || chkHeatEmpresasNomina?.checked)){
+    setEmpresasNominaResumen(null);
+    return;
+  }
+
+  const qs = new URLSearchParams();
+  qs.set("departamento", selDep?.value || "");
+  qs.set("provincia", selProv?.value || "");
+  qs.set("distrito", selDist?.value || "");
+
+  const res = await fetch(`/api/resumen_empresas_nominas?${qs.toString()}`, {
+    cache: "no-store"
+  });
+  const data = await res.json();
+  setEmpresasNominaResumen(data);
+}
+
+async function fetchEmpresasNomina(force=true){
+  if(!chkEmpresasNomina || !chkEmpresasNomina.checked){
+    syncEmpresasNominaVisibility();
+    return;
+  }
+
+  syncEmpresasNominaVisibility();
+  if(_empresasAbort){ try{ _empresasAbort.abort(); }catch(e){} }
+  _empresasAbort = new AbortController();
+
+  try{ empresasCluster.clearLayers(); }catch(e){}
+
+  const qs = new URLSearchParams();
+  qs.set("departamento", selDep?.value || "");
+  qs.set("provincia", selProv?.value || "");
+  qs.set("distrito", selDist?.value || "");
+  qs.set("zoom", map.getZoom());
+
+  const res = await fetch(`/api/empresas_nominas_points?${qs.toString()}`, {
+    signal: _empresasAbort.signal,
+    cache: "no-store"
+  });
+  const data = await res.json();
+
+  (data || []).forEach(r=>{
+    const lat = Number(r.lat), lon = Number(r.lon);
+    if(!isFinite(lat) || !isFinite(lon)) return;
+    const m = L.marker([lat, lon], { icon: empPinIcon(), zIndexOffset: 4600 });
+    m.bindPopup(empBalloonHtml(r), {
+      className: "com-popup",
+      closeButton: false,
+      autoPan: true,
+      maxWidth: 390
+    });
+    empresasCluster.addLayer(m);
+  });
+
+  _counts.empresas = Array.isArray(data) ? data.length : 0;
+  refreshInfoCount();
+  if(!map.hasLayer(empresasCluster)) empresasCluster.addTo(map);
+  await fetchResumenEmpresasNomina();
+}
+
+async function fetchHeatEmpresasNomina(){
+  if(!chkHeatEmpresasNomina || !chkHeatEmpresasNomina.checked){
+    syncEmpresasNominaVisibility();
+    return;
+  }
+
+  syncEmpresasNominaVisibility();
+  if(_empresasHeatAbort){ try{ _empresasHeatAbort.abort(); }catch(e){} }
+  _empresasHeatAbort = new AbortController();
+
+  const b = map.getBounds();
+  const qs = new URLSearchParams();
+  qs.set("departamento", selDep?.value || "");
+  qs.set("provincia", selProv?.value || "");
+  qs.set("distrito", selDist?.value || "");
+  qs.set("south", b.getSouth());
+  qs.set("west",  b.getWest());
+  qs.set("north", b.getNorth());
+  qs.set("east",  b.getEast());
+  qs.set("zoom",  map.getZoom());
+
+  const res = await fetch(`/api/empresas_nominas_heat?${qs.toString()}`, {
+    signal: _empresasHeatAbort.signal,
+    cache: "no-store"
+  });
+  const data = await res.json();
+
+  const oportunidades = (data || []).map(r => {
+    const trabajadores = Math.max(0, Number(r.trabajadores || 0));
+    const stock = Math.max(0, Number(r.stock || 0));
+
+    if(trabajadores <= 0) return 0;
+
+    let penetracion = stock / trabajadores;
+    if(!isFinite(penetracion)) penetracion = 0;
+    penetracion = Math.max(0, Math.min(1, penetracion));
+
+    return Math.max(0, trabajadores * (1 - penetracion));
+  }).filter(v => isFinite(v));
+
+  if(!oportunidades.length){
+    heatEmpresasNomina.setLatLngs([]);
+    if(!map.hasLayer(heatEmpresasNomina)) heatEmpresasNomina.addTo(map);
+    if(typeof heatEmpresasNomina.redraw === "function") heatEmpresasNomina.redraw();
+    await fetchResumenEmpresasNomina();
+    return;
+  }
+
+  let maxOpp = 0;
+  oportunidades.forEach(v => { maxOpp = Math.max(maxOpp, v); });
+  maxOpp = Math.max(1, maxOpp);
+
+  const totalPts = Array.isArray(data) ? data.length : 0;
+  const EMP_HEAT_SCALE = totalPts <= 8 ? 1.55 : totalPts <= 15 ? 1.35 : 1.20;
+
+  const latlngs = (data || []).map(r => {
+    const lat = Number(r.lat);
+    const lon = Number(r.lon);
+    const trabajadores = Math.max(0, Number(r.trabajadores || 0));
+    const stock = Math.max(0, Number(r.stock || 0));
+
+    if(!isFinite(lat) || !isFinite(lon) || trabajadores <= 0){
+      return null;
+    }
+
+    let penetracion = stock / trabajadores;
+    if(!isFinite(penetracion)) penetracion = 0;
+    penetracion = Math.max(0, Math.min(1, penetracion));
+
+    const oportunidad = Math.max(0, trabajadores * (1 - penetracion));
+
+    // ✅ Normalización robusta
+    const norm = Math.log1p(oportunidad) / Math.log1p(maxOpp);
+
+    // ✅ Abrimos mucho más la diferencia visual
+    let w = Math.pow(norm, 0.30);
+
+    // ✅ Piso más alto para que sí pinte
+    const minFloor = totalPts <= 8 ? 0.34 : totalPts <= 15 ? 0.26 : 0.18;
+
+    w = Math.max(minFloor, Math.min(1, w)) * EMP_HEAT_SCALE;
+    w = Math.min(1, w);
+
+    return [lat, lon, w];
+  }).filter(Boolean);
+
+  heatEmpresasNomina.setLatLngs(latlngs);
+
+  if(!map.hasLayer(heatEmpresasNomina)) {
+    heatEmpresasNomina.addTo(map);
+  }
+
+  if(typeof heatEmpresasNomina.redraw === "function") {
+    heatEmpresasNomina.redraw();
+  }
+
+  await fetchResumenEmpresasNomina();
+}
+
+const nodosCluster = L.markerClusterGroup({
   chunkedLoading: true,
   showCoverageOnHover: false,
   spiderfyOnMaxZoom: true,
@@ -4062,8 +4828,16 @@ _____________________ Promedio: ${pt.promedio} _____________________`;
         syncComercialVisibility();
 
         const zoom = map.getZoom();
-        //const d = selDep.value, p = selProv.value, di = selDist.value;
-        const qs = `zoom=${zoom}`;
+        const d = selDep?.value || "";
+        const p = selProv?.value || "";
+        const di = selDist?.value || "";
+
+        const qsp = new URLSearchParams();
+        qsp.set("zoom", zoom);
+        qsp.set("departamento", d);
+        qsp.set("provincia", p);
+        qsp.set("distrito", di);
+        const qs = qsp.toString();
 
         if(!force && _nodosLastKey === qs){
           if(!map.hasLayer(nodosCluster)) nodosCluster.addTo(map);
