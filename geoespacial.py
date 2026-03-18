@@ -598,6 +598,95 @@ if excel_empresas:
 else:
     print("⚠ No existe BASE_EMPRESAS_NOMINAS — capa empresas desactivada.")
 
+# ============================================================
+# 2C. CARGAR BASE DE COMPETENCIA BANCARIA ✅
+#   - Puntos bancarios de competencia
+#   - Excluir BBVA
+# ============================================================
+csv_competencia = _pick_first_existing([
+    os.path.join(BASE_DIR, "data", "puntos_bancarios.csv"),
+    "/mnt/data/puntos_bancarios.csv",
+])
+
+df_competencia = pd.DataFrame(columns=[
+    "BANCO", "DEPARTAMENTO", "PROVINCIA", "DISTRITO", "DIRECCION",
+    "LATITUD", "LONGITUD", "TIPO", "NOMBRE_PUNTO", "HORARIO"
+])
+
+
+
+if csv_competencia:
+    try:
+        raw_comp = pd.read_csv(csv_competencia, sep=";", encoding="latin1")
+        print("Columnas reales competencia:", raw_comp.columns.tolist())
+        raw_comp.columns = [str(c).strip() for c in raw_comp.columns]
+
+        # detectar columnas de forma robusta
+        cols = {c.strip().upper(): c for c in raw_comp.columns}
+
+        def get_col(name):
+            for k, v in cols.items():
+                if name in k:
+                    return v
+            return None
+
+        COLB_BANCO = get_col("BANCO")
+        COLB_DEP   = get_col("DEPARTAMENTO")
+        COLB_PROV  = get_col("PROVINCIA")
+        COLB_DIST  = get_col("DISTRITO")
+        COLB_DIR   = get_col("DIRECCION")
+        COLB_LAT   = get_col("LATITUD")
+        COLB_LON   = get_col("LONGITUD")
+        COLB_TIPO  = get_col("TIPO")
+        COLB_NOM   = get_col("NOMBRE PUNTO")
+        COLB_HOR   = get_col("HORARIO")
+
+        # por si alguna columna no existiera, crearla vacía
+        for c in [COLB_BANCO, COLB_DEP, COLB_PROV, COLB_DIST, COLB_DIR, COLB_LAT, COLB_LON, COLB_TIPO, COLB_NOM, COLB_HOR]:
+            if c not in raw_comp.columns:
+                raw_comp[c] = ""
+
+        df_competencia = pd.DataFrame({
+            "BANCO": raw_comp[COLB_BANCO].astype(str).str.strip(),
+            "DEPARTAMENTO": raw_comp[COLB_DEP].astype(str).apply(clean_str),
+            "PROVINCIA": raw_comp[COLB_PROV].astype(str).apply(clean_str),
+            "DISTRITO": raw_comp[COLB_DIST].astype(str).apply(clean_str),
+            "DIRECCION": raw_comp[COLB_DIR].astype(str).str.strip(),
+            "TIPO": raw_comp[COLB_TIPO].astype(str).str.strip().str.upper(),
+            "NOMBRE_PUNTO": raw_comp[COLB_NOM].astype(str).str.strip(),
+            "HORARIO": raw_comp[COLB_HOR].astype(str).str.strip(),
+            "LATITUD": pd.to_numeric(
+                raw_comp[COLB_LAT].astype(str)
+                    .str.replace(",", ".", regex=False)
+                    .str.replace(r"[^\d\.\-]", "", regex=True),
+                errors="coerce"
+            ),
+            "LONGITUD": pd.to_numeric(
+                raw_comp[COLB_LON].astype(str)
+                    .str.replace(",", ".", regex=False)
+                    .str.replace(r"[^\d\.\-]", "", regex=True),
+                errors="coerce"
+            ),
+        })
+
+        df_competencia = df_competencia.dropna(subset=["LATITUD", "LONGITUD"]).copy()
+
+        # excluir BBVA
+        df_competencia = df_competencia[
+            ~df_competencia["BANCO"].astype(str).str.upper().str.contains("BBVA", na=False)
+        ].copy()
+
+        print(f"✅ Competencia bancaria cargada: {len(df_competencia)} filas ({csv_competencia})")
+
+    except Exception as e:
+        print("⚠ No se pudo cargar puntos_bancarios.csv:", e)
+        df_competencia = pd.DataFrame(columns=[
+            "BANCO", "DEPARTAMENTO", "PROVINCIA", "DISTRITO", "DIRECCION",
+            "LATITUD", "LONGITUD", "TIPO", "NOMBRE_PUNTO", "HORARIO"
+        ])
+else:
+    print("⚠ No existe puntos_bancarios.csv — capa de competencia desactivada.")
+
 def _filter_empresas():
     if df_empresas is None or df_empresas.empty:
         return pd.DataFrame()
@@ -616,6 +705,82 @@ def _filter_empresas():
         dff = dff[dff["DISTRITO"].astype(str).str.upper() == dist]
 
     return dff
+
+# ============================================================
+# LISTA DE EMPRESAS PARA "UBICAR EN MAPA" (no filtra datos)
+# - Prioriza 7 nombres fijos primero
+# - Luego completa alfabéticamente
+# - Máximo 100 opciones en total
+# ============================================================
+EMPRESAS_PRIORITARIAS = [
+    "HORTIFRUT - PERU SAC",
+    "SOCIEDAD AGRICOLA RAPEL SAC",
+    "CAMPOSOL SA",
+    "ECOSAC AGRICOLA SAC",
+    "SOCIEDAD AGRICOLA 3PSAC",
+    "FAMILY FARMS PERU SOCIEDAD COMERCIAL DERESPONSABILIDAD",
+    "LOS OLIVOS DE VILLACURI SAC",
+]
+
+def _norm_empresa_nombre(s):
+    s = unicodedata.normalize("NFKD", str(s))
+    s = s.encode("ascii", "ignore").decode("utf-8")
+    s = s.upper().strip()
+    s = re.sub(r"\s+", " ", s)
+    return s
+
+EMPRESAS_LOOKUP = []
+
+if df_empresas is not None and not df_empresas.empty:
+    df_empresas_lookup = df_empresas.copy()
+    df_empresas_lookup = df_empresas_lookup[
+        df_empresas_lookup["NOMBRE_COMPLETO"].astype(str).str.strip() != ""
+    ].copy()
+
+    # deduplicar por nombre normalizado
+    df_empresas_lookup["_NOMBRE_NORM"] = df_empresas_lookup["NOMBRE_COMPLETO"].apply(_norm_empresa_nombre)
+    df_empresas_lookup = df_empresas_lookup.drop_duplicates(subset=["_NOMBRE_NORM"], keep="first").copy()
+
+    registros = []
+    for _, r in df_empresas_lookup.iterrows():
+        registros.append({
+            "nombre": str(r.get("NOMBRE_COMPLETO", "")).strip(),
+            "nombre_norm": _norm_empresa_nombre(r.get("NOMBRE_COMPLETO", "")),
+            "lat": float(r.get("LATITUD", 0.0) or 0.0),
+            "lon": float(r.get("LONGITUD", 0.0) or 0.0),
+            "departamento": str(r.get("DEPARTAMENTO", "")).strip(),
+            "provincia": str(r.get("PROVINCIA", "")).strip(),
+            "distrito": str(r.get("DISTRITO", "")).strip(),
+            "area": str(r.get("OPERAREA_DESC", "")).strip(),
+            "sector": str(r.get("CIIU_AGRUPADO", "")).strip(),
+            "stock": float(r.get("STOCK", 0.0) or 0.0),
+            "trabajadores": float(r.get("TRABAJADORES", 0.0) or 0.0),
+            "penetracion_nomina": float(r.get("PENETRACION_NOMINA", 0.0) or 0.0),
+            "share_wallet": float(r.get("SHARE_WALLET", 0.0) or 0.0),
+        })
+
+    # mapa por nombre normalizado
+    reg_by_name = {r["nombre_norm"]: r for r in registros}
+
+    # 1) priorizadas, en el orden exacto pedido
+    lookup_final = []
+    usados = set()
+
+    for nombre in EMPRESAS_PRIORITARIAS:
+        nn = _norm_empresa_nombre(nombre)
+        r = reg_by_name.get(nn)
+        if r and nn not in usados:
+            lookup_final.append(r)
+            usados.add(nn)
+
+    # 2) resto alfabético
+    resto = [r for r in registros if r["nombre_norm"] not in usados]
+    resto = sorted(resto, key=lambda x: _norm_empresa_nombre(x["nombre"]))
+
+    lookup_final.extend(resto)
+
+    # 3) máximo 100 en total
+    EMPRESAS_LOOKUP = lookup_final[:100]
 
 
 # ============================================================
@@ -1350,6 +1515,71 @@ def api_nodos():
 
     return jsonify({"total": len(nodos), "resumen": resumen, "nodos": nodos})
 
+@app.route("/api/competencia_points")
+@login_required
+def api_competencia_points():
+    if df_competencia is None or df_competencia.empty:
+        return jsonify({
+            "total": 0,
+            "resumen": {
+                "total": 0,
+                "por_tipo": {},
+                "por_banco": {}
+            },
+            "puntos": []
+        })
+
+    dpto = request.args.get("departamento", "").strip().upper()
+    prov = request.args.get("provincia", "").strip().upper()
+    dist = request.args.get("distrito", "").strip().upper()
+
+    dff = df_competencia.copy()
+
+    if dpto:
+        dff = dff[dff["DEPARTAMENTO"].astype(str).str.strip().str.upper() == dpto]
+    if prov:
+        dff = dff[dff["PROVINCIA"].astype(str).str.strip().str.upper() == prov]
+    if dist:
+        dff = dff[dff["DISTRITO"].astype(str).str.strip().str.upper() == dist]
+
+    if dff.empty:
+        return jsonify({
+            "total": 0,
+            "resumen": {
+                "total": 0,
+                "por_tipo": {},
+                "por_banco": {}
+            },
+            "puntos": []
+        })
+
+    resumen = {
+        "total": int(len(dff)),
+        "por_tipo": dff["TIPO"].fillna("").astype(str).str.strip().str.upper().value_counts().to_dict(),
+        "por_banco": dff["BANCO"].fillna("").astype(str).str.strip().value_counts().to_dict(),
+    }
+
+    puntos = []
+    for _, r in dff.iterrows():
+        puntos.append({
+            "banco": str(r.get("BANCO", "")).strip(),
+            "departamento": str(r.get("DEPARTAMENTO", "")).strip(),
+            "provincia": str(r.get("PROVINCIA", "")).strip(),
+            "distrito": str(r.get("DISTRITO", "")).strip(),
+            "direccion": str(r.get("DIRECCION", "")).strip(),
+            "tipo": str(r.get("TIPO", "")).strip().upper(),
+            "nombre_punto": str(r.get("NOMBRE_PUNTO", "")).strip(),
+            "horario": str(r.get("HORARIO", "")).strip(),
+            "lat": float(r.get("LATITUD", 0.0)),
+            "lon": float(r.get("LONGITUD", 0.0)),
+        })
+
+    return jsonify({
+        "total": len(puntos),
+        "resumen": resumen,
+        "puntos": puntos
+    })
+
 
 @app.route("/api/empresas_nominas_points")
 @login_required
@@ -1527,6 +1757,7 @@ def mapa_integral():
         div_by_dist=DIVISIONES_BY_DIST,
         divisiones=DIVISIONES,
         oficinas_lookup=OFICINAS_LOOKUP,
+        empresas_lookup=EMPRESAS_LOOKUP,
         initial_center=initial_center,
         initial_zoom=6,
     )
@@ -2690,6 +2921,23 @@ label:has(#chkHeatClientes){
 #panelEmpresasNomina .metric-mini .m-label{
   min-height: 30px;
 }
+#panelEmpresaDetalle .k-value,
+#panelEmpresaDetalle .m-value{
+  word-break: break-word;
+}
+
+#empDetNombre,
+#empDetArea,
+#empDetSector{
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+#panelEmpresaDetalle{
+  order: -1;
+}
+
   </style>
 </head>
 
@@ -2749,6 +2997,15 @@ label:has(#chkHeatClientes){
         </select>
       </label>
 
+      <label>Empresa:
+      <select id="selEmpresa">
+        <option value="">-- Ubicar empresa --</option>
+        {% for emp in empresas_lookup %}
+          <option value="{{ loop.index0 }}">{{ emp.nombre }}</option>
+        {% endfor %}
+      </select>
+    </label>
+
       {% if tipo_mapa == 'islas' %}
       <label>Tipo ATM:
         <select id="selTipoATM">
@@ -2789,6 +3046,8 @@ label:has(#chkHeatClientes){
 
       <!-- ✅ COMERCIAL / NODOS -->
       <label style="margin-left:16px;"><input type="checkbox" id="chkNodos"> Puntos Comerciales(Tráfico Personas)</label>
+
+      <label style="margin-left:16px;"><input type="checkbox" id="chkCompetencia"> Puntos Competencia</label>
 
       <!-- ✅ ZONAS -->
       <div class="zone-box" style="margin-left:16px;">
@@ -2923,6 +3182,100 @@ label:has(#chkHeatClientes){
   </div>
 </div>
 
+
+<!-- ✅ PANEL DETALLE EMPRESA -->
+<div id="panelEmpresaDetalle" class="side-card hidden">
+  <div class="dash-panel">
+    <div class="dash-top-title">
+      <div>
+        <div class="side-title">🏢 Empresa seleccionada</div>
+        <div class="muted">Detalle de la empresa elegida en el mapa.</div>
+      </div>
+    </div>
+
+    <div class="dash-section">
+      <div class="dash-kpi" style="margin-bottom:10px;">
+        <div class="k-label">Empresa</div>
+        <div class="k-value" id="empDetNombre" style="font-size:22px; line-height:1.15;">—</div>
+      </div>
+    </div>
+
+    <div class="dash-section">
+      <div class="dash-section-title">Ubicación</div>
+      <div class="dash-grid-3">
+        <div class="metric-mini">
+          <div class="m-label">Departamento</div>
+          <div class="m-value" id="empDetDep">—</div>
+        </div>
+        <div class="metric-mini">
+          <div class="m-label">Provincia</div>
+          <div class="m-value" id="empDetProv">—</div>
+        </div>
+        <div class="metric-mini">
+          <div class="m-label">Distrito</div>
+          <div class="m-value" id="empDetDist">—</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="dash-section">
+      <div class="dash-section-title">Negocio</div>
+      <div class="dash-grid-2">
+        <div class="metric-mini">
+          <div class="m-label">Área</div>
+          <div class="m-value" id="empDetArea">—</div>
+        </div>
+        <div class="metric-mini">
+          <div class="m-label">Sector</div>
+          <div class="m-value" id="empDetSector">—</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="dash-section">
+      <div class="dash-section-title">Planilla / relación BBVA</div>
+      <div class="dash-grid-2">
+        <div class="metric-mini">
+          <div class="m-label">Trabajadores</div>
+          <div class="m-value" id="empDetTrab">0</div>
+        </div>
+        <div class="metric-mini">
+          <div class="m-label">Stock nómina BBVA</div>
+          <div class="m-value" id="empDetStock">0</div>
+        </div>
+        <div class="metric-mini">
+          <div class="m-label">Penetración</div>
+          <div class="m-value" id="empDetPen">0%</div>
+        </div>
+        <div class="metric-mini">
+          <div class="m-label">Oportunidad</div>
+          <div class="m-value" id="empDetOpp">0</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="dash-section">
+      <div class="dash-section-title">Saldos</div>
+      <div class="dash-grid-2">
+        <div class="metric-mini">
+          <div class="m-label">Saldo BBVA</div>
+          <div class="m-value" id="empDetSaldoBbva">0</div>
+        </div>
+        <div class="metric-mini">
+          <div class="m-label">Saldo sistema</div>
+          <div class="m-value" id="empDetSaldoSystem">0</div>
+        </div>
+        <div class="metric-mini">
+          <div class="m-label">Share wallet</div>
+          <div class="m-value" id="empDetShare">0%</div>
+        </div>
+      </div>
+    </div>
+
+    <button id="btnEmpVolver" class="btn-volver">VOLVER</button>
+  </div>
+</div>
+
       <!-- ✅ PANEL COMERCIAL (POIs) -->
       <div id="panelComercial" class="side-card hidden">
         <div class="side-title">🏪 Panel Comercial</div>
@@ -2955,6 +3308,59 @@ label:has(#chkHeatClientes){
           </div>
         </div>
       </div>
+
+      <!-- ✅ PANEL COMPETENCIA -->
+<div id="panelCompetencia" class="side-card hidden" style="display:none;">
+  <div class="dash-panel">
+    <div>
+      <div class="side-title">🏦 Competencia bancaria</div>
+      <div class="muted">Se actualiza con filtros y excluye puntos BBVA.</div>
+    </div>
+
+    <div class="dash-top">
+      <div class="dash-kpi">
+        <div class="k-label">Total puntos</div>
+        <div class="k-value" id="compTotal">0</div>
+      </div>
+    </div>
+
+    <div class="dash-section">
+      <div class="dash-section-title">Conteo por tipo</div>
+      <div class="dash-grid-3">
+        <div class="metric-mini">
+          <div class="m-label">ATM</div>
+          <div class="m-value" id="compTipoATM">0</div>
+        </div>
+        <div class="metric-mini">
+          <div class="m-label">Agente</div>
+          <div class="m-value" id="compTipoAGENTE">0</div>
+        </div>
+        <div class="metric-mini">
+          <div class="m-label">Oficina</div>
+          <div class="m-value" id="compTipoOFICINA">0</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="dash-section">
+      <div class="dash-section-title">Conteo por banco</div>
+      <div class="dash-grid-3">
+        <div class="metric-mini">
+          <div class="m-label">BCP</div>
+          <div class="m-value" id="compBancoBCP">0</div>
+        </div>
+        <div class="metric-mini">
+          <div class="m-label">Scotiabank</div>
+          <div class="m-value" id="compBancoSCOTIABANK">0</div>
+        </div>
+        <div class="metric-mini">
+          <div class="m-label">Interbank</div>
+          <div class="m-value" id="compBancoINTERBANK">0</div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
 
       <!--
       <div id="panelDfComercios" class="card panel-df-comercios" style="display:none;">
@@ -3186,6 +3592,7 @@ label:has(#chkHeatClientes){
     const TIPO_MAPA = "{{ tipo_mapa }}";
 
     const OFICINAS_LOOKUP = {{ oficinas_lookup|tojson }};
+    const EMPRESAS_LOOKUP = {{ empresas_lookup|tojson }};
 
     const INITIAL_CENTER = [{{ initial_center[0] }}, {{ initial_center[1] }}];
     const INITIAL_ZOOM = {{ initial_zoom }};
@@ -3713,6 +4120,7 @@ const comerciosCluster = L.markerClusterGroup({
     const selDist = document.getElementById("selDistrito");
     const selDiv = document.getElementById("selDivision");
     const selOficina = document.getElementById("selOficina");
+    const selEmpresa = document.getElementById("selEmpresa");
 
     const chkHeat = document.getElementById("chkHeat");
     const chkHeatClientes = document.getElementById("chkHeatClientes");
@@ -3742,6 +4150,9 @@ if(chkHeat) chkHeat.addEventListener("change", setHeatOnClass);
 
     const chkNodos = document.getElementById("chkNodos");
     const panelComercial = document.getElementById("panelComercial");
+
+    const chkCompetencia = document.getElementById("chkCompetencia");
+    const panelCompetencia = document.getElementById("panelCompetencia");
 
     const panelDfComercios = document.getElementById("panelDfComercios");
     // ======================================================
@@ -4076,10 +4487,17 @@ map.on("moveend", () => {
 });
 
 refreshGeoSelectors();
-// por si el checkbox arranca marcado (cache del navegador)
-map.whenReady(() => {
+
+map.whenReady(async () => {
+  await scheduleReload(true);
+  showResumenPanels();
+
   if(chkHeatClientes && chkHeatClientes.checked){
     fetchHeatClientes(true);
+  }
+
+  if(chkCompetencia && chkCompetencia.checked){
+    await fetchCompetencia(true);
   }
 });
 
@@ -4087,7 +4505,7 @@ map.whenReady(() => {
     // ======================================================
     // ✅ CONTADORES (para "Mostrando")
     // ======================================================
-    const _counts = { base: 0, nodos: 0, comercios: 0, empresas: 0 };
+    const _counts = { base: 0, nodos: 0, comercios: 0, competencia: 0, empresas: 0 };
 
     function refreshInfoCount(){
       let total = 0;
@@ -4095,6 +4513,7 @@ map.whenReady(() => {
       if(chkNodos && chkNodos.checked) total += Number(_counts.nodos || 0);
       if(chkComerciosPts && chkComerciosPts.checked) total += Number(_counts.comercios || 0);
       if(chkEmpresasNomina && chkEmpresasNomina.checked) total += Number(_counts.empresas || 0);
+      if(chkCompetencia && chkCompetencia.checked) total += Number(_counts.competencia || 0);
       infoBox.textContent = String(total);
     }
 
@@ -4109,6 +4528,9 @@ map.whenReady(() => {
     const recoDetalle = document.getElementById("recoDetalle");
     const btnRecoVolver = document.getElementById("btnRecoVolver");
 
+    const panelEmpresaDetalle = document.getElementById("panelEmpresaDetalle");
+    const btnEmpVolver = document.getElementById("btnEmpVolver");
+
     const panelATMResumen = document.getElementById("panelATMResumen");
     const panelOfiResumen = document.getElementById("panelOfiResumen");
     const panelAgResumen = document.getElementById("panelAgResumen");
@@ -4118,6 +4540,7 @@ map.whenReady(() => {
       if(panelOfiResumen) panelOfiResumen.classList.add("hidden");
       if(panelAgResumen) panelAgResumen.classList.add("hidden");
       syncComercialVisibility();
+      syncCompetenciaVisibility();
       syncDfComerciosPanelVisibility();
     }
 
@@ -4132,6 +4555,7 @@ map.whenReady(() => {
       if(TIPO_MAPA === "integral"){ syncIntegralPanelsVisibility(); }
       else { syncSinglePanelsVisibility(); }
       syncComercialVisibility();
+      syncCompetenciaVisibility();
       syncDfComerciosPanelVisibility();
     }
 
@@ -4431,6 +4855,47 @@ _____________________ Promedio: ${pt.promedio} _____________________`;
       // abre automáticamente el panel de detalle
       showATMPanel(ofi);
     }
+
+    function clearEmpresaFocus(){
+      clearOfficeFocus();
+    }
+
+    function createEmpresaFocusIcon(){
+      return L.divIcon({
+        className: "office-focus-icon",
+        html: `<div class="office-focus-wrap" style="border-color:#6B46C1; box-shadow:0 0 0 6px rgba(107,70,193,.18), 0 0 18px rgba(107,70,193,.35);"></div>`,
+        iconSize: [58,58],
+        iconAnchor: [29,29]
+      });
+    }
+
+    function focusEmpresaOnMap(emp){
+      if(!emp) return;
+
+      const lat = Number(emp.lat);
+      const lon = Number(emp.lon);
+      if(!isFinite(lat) || !isFinite(lon)) return;
+
+      clearEmpresaFocus();
+
+      map.setView([lat, lon], 17, { animate:true });
+
+      currentOfficeFocusMarker = L.marker([lat, lon], {
+        icon: createEmpresaFocusIcon(),
+        zIndexOffset: 10000
+      }).addTo(map);
+
+      currentOfficeFocusCircle = L.circle([lat, lon], {
+        radius: 34,
+        color: "#6B46C1",
+        weight: 2,
+        fillColor: "#6B46C1",
+        fillOpacity: 0.12,
+        opacity: 0.85
+      }).addTo(map);
+    }
+
+
     
 
     btnVolver.addEventListener("click", () => {
@@ -4444,6 +4909,14 @@ _____________________ Promedio: ${pt.promedio} _____________________`;
       panelReco.classList.remove("glow");
       showResumenPanels();
     };
+
+    if(btnEmpVolver){
+      btnEmpVolver.onclick = () => {
+        panelEmpresaDetalle.classList.add("hidden");
+        panelEmpresaDetalle.classList.remove("glow");
+        showResumenPanels();
+      };
+    }
 
     // ======================================================
     // ✅ COMERCIAL/NODOS — pin rojo + popup globo + panel conteo
@@ -4561,6 +5034,10 @@ function syncEmpresasNominaVisibility(){
     setEmpresasNominaResumen(null);
     refreshInfoCount();
   }
+  if(!showPanel && panelEmpresaDetalle){
+  panelEmpresaDetalle.classList.add("hidden");
+  panelEmpresaDetalle.classList.remove("glow");
+  }
 }
 
 function setEmpresasNominaResumen(data){
@@ -4575,6 +5052,44 @@ function setEmpresasNominaResumen(data){
   z("empNomSector", d.top_sector || "—");
   z("empNomSaldoBbva", fmtMoneyShort(d.saldo_bbva_total || 0));
   z("empNomSaldoSystem", fmtMoneyShort(d.saldo_system_total || 0));
+}
+
+function showEmpresaDetalle(r){
+  if(!r || !panelEmpresaDetalle) return;
+
+  const z = (id, val) => {
+    const el = document.getElementById(id);
+    if(el) el.textContent = val;
+  };
+
+  const trabajadores = Math.max(0, Number(r.trabajadores || 0));
+  const stock = Math.max(0, Number(r.stock || 0));
+  const pen = Number(r.penetracion_nomina || 0) * 100;
+  const share = Number(r.share_wallet || 0) * 100;
+  const saldoBbva = Number(r.bbva_balance_amount || 0);
+  const saldoSystem = Number(r.system_balance_amount || 0);
+  const oportunidad = Math.max(0, trabajadores - stock);
+
+  z("empDetNombre", r.nombre_completo || "—");
+  z("empDetDep", r.departamento || "—");
+  z("empDetProv", r.provincia || "—");
+  z("empDetDist", r.distrito || "—");
+
+  z("empDetArea", r.operarea_desc || "—");
+  z("empDetSector", r.ciiu_agrupado || "—");
+
+  z("empDetTrab", fmtMoneyShort(trabajadores));
+  z("empDetStock", fmtMoneyShort(stock));
+  z("empDetPen", `${pen.toFixed(1)}%`);
+  z("empDetOpp", fmtMoneyShort(oportunidad));
+
+  z("empDetSaldoBbva", fmtMoneyShort(saldoBbva));
+  z("empDetSaldoSystem", fmtMoneyShort(saldoSystem));
+  z("empDetShare", `${share.toFixed(1)}%`);
+
+  hideResumenPanels();
+  panelEmpresaDetalle.classList.remove("hidden");
+  panelEmpresaDetalle.classList.add("glow");
 }
 
 async function fetchResumenEmpresasNomina(){
@@ -4622,13 +5137,20 @@ async function fetchEmpresasNomina(force=true){
   (data || []).forEach(r=>{
     const lat = Number(r.lat), lon = Number(r.lon);
     if(!isFinite(lat) || !isFinite(lon)) return;
+
     const m = L.marker([lat, lon], { icon: empPinIcon(), zIndexOffset: 4600 });
+
     m.bindPopup(empBalloonHtml(r), {
       className: "com-popup",
       closeButton: false,
       autoPan: true,
       maxWidth: 390
     });
+
+    m.on("click", () => {
+      showEmpresaDetalle(r);
+    });
+
     empresasCluster.addLayer(m);
   });
 
@@ -4818,6 +5340,176 @@ const nodosCluster = L.markerClusterGroup({
 
     let _nodosLastKey = "";
     let _nodosAbort = null;
+
+    const competenciaCluster = L.markerClusterGroup({
+  spiderfyOnMaxZoom: true,
+  showCoverageOnHover: false,
+  disableClusteringAtZoom: 17,
+  maxClusterRadius: 55
+});
+
+function compColorBanco(banco){
+  const b = String(banco || "").toUpperCase();
+  if(b.includes("BCP")) return "#1D4ED8";
+  if(b.includes("SCOTIABANK")) return "#DC2626";
+  if(b.includes("INTERBANK")) return "#16A34A";
+  return "#6B7280";
+}
+
+function competenciaPinIcon(banco){
+  const fill = compColorBanco(banco);
+  return L.divIcon({
+    className: "nodo-pin",
+    html: `
+      <div class="nodo-pin-wrap" style="filter: drop-shadow(0 4px 8px rgba(0,0,0,.20));">
+        <svg viewBox="0 0 24 24" fill="${fill}" stroke="#ffffff" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M12 22s7-4.5 7-12a7 7 0 0 0-14 0c0 7.5 7 12 7 12z"></path>
+          <circle cx="12" cy="10" r="2.7" fill="#ffffff" stroke="none"></circle>
+        </svg>
+      </div>
+    `,
+    iconSize: [28, 36],
+    iconAnchor: [14, 34],
+    popupAnchor: [0, -28]
+  });
+}
+
+function competenciaBalloonHtml(p){
+  return `
+    <div class="nodo-balloon">
+      <div style="font-weight:800;">${escHtml(p.banco || "")}</div>
+      <div>${escHtml(p.nombre_punto || "Sin nombre")}</div>
+      <div style="opacity:.85;">${escHtml(p.tipo || "")}</div>
+      <div style="opacity:.80;">${escHtml(p.direccion || "")}</div>
+    </div>
+  `;
+}
+
+function syncCompetenciaVisibility(){
+  if(!chkCompetencia) return;
+  const show = chkCompetencia.checked;
+
+  if(panelCompetencia) panelCompetencia.classList.toggle("hidden", !show);
+
+  if(!show){
+    try{ if(map.hasLayer(competenciaCluster)) map.removeLayer(competenciaCluster); }catch(e){}
+    competenciaCluster.clearLayers();
+    _counts.competencia = 0;
+    setCompetenciaCounts(null);
+    refreshInfoCount();
+  }else{
+    if(!map.hasLayer(competenciaCluster)) competenciaCluster.addTo(map);
+  }
+}
+
+function setCompetenciaCounts(res){
+  const z = (id, v) => {
+    const el = document.getElementById(id);
+    if(el) el.textContent = String(v ?? 0);
+  };
+
+  if(!res){
+    z("compTotal", 0);
+    z("compTipoATM", 0);
+    z("compTipoAGENTE", 0);
+    z("compTipoOFICINA", 0);
+    z("compBancoBCP", 0);
+    z("compBancoSCOTIABANK", 0);
+    z("compBancoINTERBANK", 0);
+    return;
+  }
+
+  const porTipo = res.por_tipo || {};
+  const porBanco = res.por_banco || {};
+  const bancoEntries = Object.entries(porBanco);
+
+  const sumBanco = (matcher) => bancoEntries.reduce((acc, [k, v]) => {
+    const kk = String(k || "").trim().toUpperCase();
+    return matcher(kk) ? acc + Number(v || 0) : acc;
+  }, 0);
+
+  const totalBCP = sumBanco(k =>
+    k.includes("BCP") ||
+    k.includes("CREDITO DEL PERU") ||
+    k.includes("BANCO DE CREDITO")
+  );
+
+  const totalScotia = sumBanco(k =>
+    k.includes("SCOTIABANK")
+  );
+
+  const totalInterbank = sumBanco(k =>
+    k.includes("INTERBANK")
+  );
+
+  z("compTotal", res.total || 0);
+  z("compTipoATM", porTipo["ATM"] || 0);
+  z("compTipoAGENTE", porTipo["AGENTE"] || 0);
+  z("compTipoOFICINA", porTipo["OFICINA"] || porTipo["Oficina"] || 0);
+
+  z("compBancoBCP", totalBCP);
+  z("compBancoSCOTIABANK", totalScotia);
+  z("compBancoINTERBANK", totalInterbank);
+}
+
+let _competenciaLastKey = "";
+let _competenciaAbort = null;
+
+async function fetchCompetencia(force=false){
+  try{
+    if(!chkCompetencia || !chkCompetencia.checked){
+      syncCompetenciaVisibility();
+      return;
+    }
+
+    syncCompetenciaVisibility();
+
+    const qs = new URLSearchParams();
+    qs.set("departamento", selDep?.value || "");
+    qs.set("provincia", selProv?.value || "");
+    qs.set("distrito", selDist?.value || "");
+
+    const key = qs.toString();
+    if(!force && _competenciaLastKey === key){
+      if(!map.hasLayer(competenciaCluster)) competenciaCluster.addTo(map);
+      return;
+    }
+    _competenciaLastKey = key;
+
+    if(_competenciaAbort){ try{ _competenciaAbort.abort(); }catch(e){} }
+    _competenciaAbort = new AbortController();
+
+    competenciaCluster.clearLayers();
+
+    const res = await fetch(`/api/competencia_points?${key}`, { signal: _competenciaAbort.signal });
+    const js = await res.json();
+
+    const arr = js.puntos || [];
+    const resumen = js.resumen || null;
+    console.log("por_banco competencia:", resumen?.por_banco);
+
+    _counts.competencia = arr.length;
+    refreshInfoCount();
+    setCompetenciaCounts(resumen);
+
+    arr.forEach(p => {
+      const m = L.marker([p.lat, p.lon], {
+        icon: competenciaPinIcon(p.banco),
+        zIndexOffset: 4800
+      });
+      m.bindPopup(competenciaBalloonHtml(p), {
+        className: "nodo-popup",
+        closeButton: false,
+        autoPan: true,
+        maxWidth: 360
+      });
+      competenciaCluster.addLayer(m);
+    });
+  }catch(err){
+    if(String(err || "").includes("AbortError")) return;
+    console.error("Error cargando competencia:", err);
+  }
+}
 
     async function fetchNodos(force=false){
       try{
@@ -5214,6 +5906,21 @@ const nodosCluster = L.markerClusterGroup({
       }
 
       focusOfficeOnMap(ofiReal);
+    }
+
+    function ubicarEmpresaSeleccionada(){
+      if(!selEmpresa) return;
+
+      const idx = selEmpresa.value;
+      if(idx === "" || idx === null || idx === undefined){
+        clearEmpresaFocus();
+        return;
+      }
+
+      const baseEmp = EMPRESAS_LOOKUP[Number(idx)];
+      if(!baseEmp) return;
+
+      focusEmpresaOnMap(baseEmp);
     }
 
 
@@ -5884,12 +6591,12 @@ heatGlow.setLatLngs(heatPts);
         if(mySeq !== _reloadSeq) return;
 
         if(chkNodos && chkNodos.checked) await fetchNodos(true);
+        if(chkCompetencia && chkCompetencia.checked) await fetchCompetencia(true);
         if(chkComerciosPts && chkComerciosPts.checked) await fetchComerciosPts(true);
 
         if(chkHeatClientes && chkHeatClientes.checked) await fetchHeatClientes(true);
         if(chkHeatClientes && chkHeatClientes.checked) _scheduleHeatClientes(true);
         if(chkHeatCantClientes && chkHeatCantClientes.checked) await fetchHeatCantClientes(true);
-
         await fetchZonasBorders();
         refreshInfoCount();
 
@@ -5898,6 +6605,7 @@ heatGlow.setLatLngs(heatPts);
 
         try{
           if(chkNodos && chkNodos.checked) await fetchNodos(true);
+          if(chkCompetencia && chkCompetencia.checked) await fetchCompetencia(true);
           if(chkComerciosPts && chkComerciosPts.checked) await fetchComerciosPts(true);
           if(chkHeatClientes && chkHeatClientes.checked) await fetchHeatClientes(true);
           if(chkHeatCantClientes && chkHeatCantClientes.checked) await fetchHeatCantClientes(true);
@@ -5928,6 +6636,10 @@ heatGlow.setLatLngs(heatPts);
 
     if(selOficina){
       selOficina.addEventListener("change", ubicarOficinaSeleccionada);
+    }
+
+    if(selEmpresa){
+      selEmpresa.addEventListener("change", ubicarEmpresaSeleccionada);
     }
 
     if(selTipoATM) selTipoATM.addEventListener("change", ()=>scheduleReload(true));
@@ -6022,6 +6734,12 @@ map.on("moveend", () => {
     if(chkNodos) chkNodos.addEventListener("change", async () => {
       syncComercialVisibility();
       await fetchNodos(true);
+      refreshInfoCount();
+    });
+
+    if(chkCompetencia) chkCompetencia.addEventListener("change", async () => {
+      syncCompetenciaVisibility();
+      await fetchCompetencia(true);
       refreshInfoCount();
     });
 
