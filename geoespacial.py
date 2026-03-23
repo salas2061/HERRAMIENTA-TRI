@@ -35,8 +35,53 @@ from functools import wraps
 # ============================================
 # RECOMENDACIONES – CARGA BÁSICA
 # ============================================
+# ============================================
+# RECOMENDACIONES – CARGA ROBUSTA
+# ============================================
 try:
     recomendaciones = pd.read_csv("data/recomendaciones.csv")
+
+    # asegurar columnas mínimas
+    cols_min = [
+        "lat", "lon", "canal", "clientes_afectados",
+        "departamento", "provincia", "distrito",
+        "perfil_top", "pct_digital", "ingreso_prom",
+        "edad_prom", "diagnostico"
+    ]
+    for c in cols_min:
+        if c not in recomendaciones.columns:
+            recomendaciones[c] = None
+
+    # lat/lon numéricos y válidos
+    recomendaciones["lat"] = pd.to_numeric(recomendaciones["lat"], errors="coerce")
+    recomendaciones["lon"] = pd.to_numeric(recomendaciones["lon"], errors="coerce")
+    recomendaciones = recomendaciones.dropna(subset=["lat", "lon"]).copy()
+
+    # columnas numéricas conocidas: convertir y limpiar NaN/inf
+    numeric_cols = [
+        "clientes_afectados",
+        "pct_digital",
+        "ingreso_prom",
+        "edad_prom",
+        "promedio_transacciones_red",
+        "oportunidad_clientes_nominas",
+        "%Participacion_General_BBVA",
+        "%Participacion_PN_BBVA",
+        "%Participacion_PYME_BBVA",
+        "Ranking_General",
+        "Ranking_PN",
+        "Ranking_PYME",
+    ]
+
+    for c in numeric_cols:
+        if c in recomendaciones.columns:
+            recomendaciones[c] = pd.to_numeric(recomendaciones[c], errors="coerce")
+
+    # reemplazar inf/-inf por NaN
+    recomendaciones = recomendaciones.replace([np.inf, -np.inf], np.nan)
+
+    print(f"✅ recomendaciones.csv cargado: {len(recomendaciones)} filas")
+
 except Exception as e:
     print("⚠ No se pudo cargar recomendaciones.csv:", e)
     recomendaciones = pd.DataFrame()
@@ -1372,8 +1417,16 @@ def selector():
 @app.route("/api/recomendaciones")
 @login_required
 def api_recomendaciones():
-    return jsonify(recomendaciones.to_dict(orient="records"))
+    if recomendaciones is None or recomendaciones.empty:
+        return jsonify([])
 
+    df_rec = recomendaciones.copy()
+
+    # 🔥 REEMPLAZA NaN / inf
+    df_rec = df_rec.replace([np.inf, -np.inf], np.nan)
+    df_rec = df_rec.fillna(0)   # 👈 CLAVE
+
+    return jsonify(df_rec.to_dict(orient="records"))
 # ============================================================
 # ✅ API ZONAS — /api/zonas (RURAL / URBANA)
 # ============================================================
@@ -3040,7 +3093,24 @@ label:has(#chkHeatClientes){
       <label style="margin-left:16px;"><input type="checkbox" id="chkHeatClientes"> Heatmap Clientes</label>
       <label style="margin-left:16px;"><input type="checkbox" id="chkHeatCantClientes"> Heatmap Cantidad de Clientes</label>
       <label style="margin-left:16px;"><input type="checkbox" id="chkComerciosPts"> Comercios Usados por Clientes</label>
+
       <label style="margin-left:16px;"><input type="checkbox" id="chkReco"> Recomendaciones</label>
+
+      <select id="selRecoCanal" style="margin-left:8px;">
+        <option value="">Canal sugerido</option>
+        <option value="OFICINA">OFICINA</option>
+        <option value="OFICINA_NOMINAS">OFICINAS NOMINAS</option>
+        <option value="ATM">ATM</option>
+        <option value="AGENTE">AGENTE</option>
+      </select>
+
+      <select id="selRecoAccion" style="margin-left:8px;">
+        <option value="">Acción sugerida</option>
+        <option value="nuevo_punto">nuevo_punto</option>
+        <option value="reforzar_punto">reforzar_punto</option>
+        <option value="revisar_cobertura">revisar_cobertura</option>
+      </select>
+
       <label style="margin-left:16px;"><input type="checkbox" id="chkEmpresasNomina"> Empresas Nómina</label>
       <label style="margin-left:16px;"><input type="checkbox" id="chkHeatEmpresasNomina"> Heatmap Oportunidad Empresas</label>
 
@@ -3560,6 +3630,11 @@ label:has(#chkHeatClientes){
         <h3 id="panelATMTitle">Panel del punto seleccionado</h3>
         <div id="atmDetalle" style="font-size:12px;"></div>
         <button id="btnVolver" class="btn-small">VOLVER</button>
+      </div>
+
+      <div id="panelRecoResumen" class="side-card side-card-atm hidden">
+        <h3>Resumen recomendaciones</h3>
+        <div id="recoResumenDetalle" style="font-size:12px;"></div>
       </div>
 
       <div id="panelReco" class="side-card side-card-atm hidden">
@@ -4145,6 +4220,9 @@ if(chkHeat) chkHeat.addEventListener("change", setHeatOnClass);
     const selSegmento = null;
 
     const chkReco = document.getElementById("chkReco");
+    const selRecoCanal = document.getElementById("selRecoCanal");
+    const selRecoAccion = document.getElementById("selRecoAccion");
+
     const chkZonaRural  = document.getElementById("chkZonaRural");
     const chkZonaUrbana = document.getElementById("chkZonaUrbana");
 
@@ -4524,6 +4602,9 @@ map.whenReady(async () => {
     const atmDetalle = document.getElementById("atmDetalle");
     const btnVolver = document.getElementById("btnVolver");
 
+    const panelRecoResumen = document.getElementById("panelRecoResumen");
+    const recoResumenDetalle = document.getElementById("recoResumenDetalle");
+
     const panelReco = document.getElementById("panelReco");
     const recoDetalle = document.getElementById("recoDetalle");
     const btnRecoVolver = document.getElementById("btnRecoVolver");
@@ -4534,11 +4615,13 @@ map.whenReady(async () => {
     const panelATMResumen = document.getElementById("panelATMResumen");
     const panelOfiResumen = document.getElementById("panelOfiResumen");
     const panelAgResumen = document.getElementById("panelAgResumen");
+    const panelRecoResumenRef = document.getElementById("panelRecoResumen");
 
     function hideResumenPanels(){
       if(panelATMResumen) panelATMResumen.classList.add("hidden");
       if(panelOfiResumen) panelOfiResumen.classList.add("hidden");
       if(panelAgResumen) panelAgResumen.classList.add("hidden");
+      if(panelRecoResumenRef) panelRecoResumenRef.classList.add("hidden");
       syncComercialVisibility();
       syncCompetenciaVisibility();
       syncDfComerciosPanelVisibility();
@@ -4557,15 +4640,20 @@ map.whenReady(async () => {
       syncComercialVisibility();
       syncCompetenciaVisibility();
       syncDfComerciosPanelVisibility();
+
+      if(panelRecoResumenRef && chkReco && chkReco.checked){
+        panelRecoResumenRef.classList.remove("hidden");
+      }
+
     }
 
     function showRecoPanel(r){
       if (!r) return;
 
-      const canal = String(r.canal||"").toUpperCase();
+      const canal = String(r.canal || "").toUpperCase();
+      const accion = String(r.accion_sugerida || "—");
       const ubic = `${r.departamento} / ${r.provincia} / ${r.distrito}`;
-
-      const diagnostico = String(r.diagnostico||"").replace(/\\[|\\]|\'/g,"");
+      const diagnostico = String(r.diagnostico || "").replace(/\\[|\\]|\'/g,"");
 
       const html = `
         <div class="detail-panel">
@@ -4580,16 +4668,34 @@ map.whenReady(async () => {
 
           <div class="dp-kpis">
             <div class="kpi"><div class="lbl">Clientes afectados</div><div class="val">${fmt0(r.clientes_afectados)}</div></div>
-            <!--<div class="kpi"><div class="lbl">% Digitales</div><div class="val">${(Number(r.pct_digital||0)*100).toFixed(1)}%</div></div>-->
-            <!--<div class="kpi"><div class="lbl">Edad promedio</div><div class="val">${Number(r.edad_prom||0).toFixed(1)}</div></div>-->
-            <!--<div class="kpi"><div class="lbl">Ingreso promedio</div><div class="val">S/ ${Number(r.ingreso_prom||0).toFixed(2)}</div></div>-->
+            <div class="kpi"><div class="lbl">Acción sugerida</div><div class="val">${esc(accion)}</div></div>
           </div>
 
           <div class="dp-section">
             <div class="sec-title">Información</div>
             <div class="dp-rows">
               <div class="dp-row"><span class="k">Canal sugerido</span><span class="v">${esc(canal)}</span></div>
+              <div class="dp-row"><span class="k">Prom. trx red</span><span class="v">${fmt0(r.promedio_transacciones_red)}</span></div>
+              <div class="dp-row"><span class="k">Oportunidad nómina</span><span class="v">${fmt0(r.oportunidad_clientes_nominas)}</span></div>
               <div class="dp-row"><span class="k">Coordenadas</span><span class="v">lat ${esc(r.lat)} · lon ${esc(r.lon)}</span></div>
+            </div>
+          </div>
+
+          <div class="dp-section">
+            <div class="sec-title">Market Share BBVA</div>
+            <div class="dp-rows">
+              <div class="dp-row"><span class="k">General</span><span class="v">${recoPct(r["%Participacion_General_BBVA"])}</span></div>
+              <div class="dp-row"><span class="k">PN</span><span class="v">${recoPct(r["%Participacion_PN_BBVA"])}</span></div>
+              <div class="dp-row"><span class="k">PYME</span><span class="v">${recoPct(r["%Participacion_PYME_BBVA"])}</span></div>
+            </div>
+          </div>
+
+          <div class="dp-section">
+            <div class="sec-title">Ranking</div>
+            <div class="dp-rows">
+              <div class="dp-row"><span class="k">General</span><span class="v">${fmt0(r["Ranking_General"])}</span></div>
+              <div class="dp-row"><span class="k">PN</span><span class="v">${fmt0(r["Ranking_PN"])}</span></div>
+              <div class="dp-row"><span class="k">PYME</span><span class="v">${fmt0(r["Ranking_PYME"])}</span></div>
             </div>
           </div>
 
@@ -6198,23 +6304,146 @@ if(!window.__BBVA_COMERCIOS_HOOKS__){
     // RECOMENDACIONES
     // ======================================================
     let recoLoaded = false;
+    let recoDataAll = [];
+    let recoDataFiltered = [];
+
+    function recoPct(v){
+      const n = Number(v);
+      if(!isFinite(n)) return "0.0%";
+      return `${(n <= 1 ? n * 100 : n).toFixed(1)}%`;
+    }
+
+    function recoTxt(v){
+      return String(v ?? "").trim();
+    }
+
+    function getRecoFiltradas(){
+      const canalSel = recoTxt(selRecoCanal?.value).toUpperCase();
+      const accionSel = recoTxt(selRecoAccion?.value).toLowerCase();
+
+      const dep = recoTxt(selDep?.value).toUpperCase();
+      const prov = recoTxt(selProv?.value).toUpperCase();
+      const dist = recoTxt(selDist?.value).toUpperCase();
+
+      return (recoDataAll || []).filter(r => {
+        const canal = recoTxt(r.canal).toUpperCase();
+        const accion = recoTxt(r.accion_sugerida).toLowerCase();
+
+        const rDep = recoTxt(r.departamento).toUpperCase();
+        const rProv = recoTxt(r.provincia).toUpperCase();
+        const rDist = recoTxt(r.distrito).toUpperCase();
+
+        const okCanal = !canalSel || canal === canalSel;
+        const okAccion = !accionSel || accion === accionSel;
+        const okDep = !dep || rDep === dep;
+        const okProv = !prov || rProv === prov;
+        const okDist = !dist || rDist === dist;
+
+        return okCanal && okAccion && okDep && okProv && okDist;
+      });
+    }
+
+    function renderRecoResumen(data){
+      const rows = Array.isArray(data) ? data : [];
+      const total = rows.length;
+
+      const totalClientes = rows.reduce((acc, r) => acc + (Number(r.clientes_afectados) || 0), 0);
+
+      const porCanal = {};
+      const porAccion = {};
+
+      rows.forEach(r => {
+        const canal = recoTxt(r.canal).toUpperCase() || "SIN DATO";
+        const accion = recoTxt(r.accion_sugerida) || "sin_dato";
+
+        porCanal[canal] = (porCanal[canal] || 0) + 1;
+        porAccion[accion] = (porAccion[accion] || 0) + 1;
+      });
+
+      const htmlCanal = Object.entries(porCanal)
+        .sort((a,b) => b[1] - a[1])
+        .map(([k,v]) => `<div class="dp-row"><span class="k">${esc(k)}</span><span class="v">${fmt0(v)}</span></div>`)
+        .join("");
+
+      const htmlAccion = Object.entries(porAccion)
+        .sort((a,b) => b[1] - a[1])
+        .map(([k,v]) => `<div class="dp-row"><span class="k">${esc(k)}</span><span class="v">${fmt0(v)}</span></div>`)
+        .join("");
+
+      recoResumenDetalle.innerHTML = `
+        <div class="detail-panel">
+          <div class="dp-kpis">
+            <div class="kpi"><div class="lbl">Puntos recomendados</div><div class="val">${fmt0(total)}</div></div>
+            <div class="kpi"><div class="lbl">Clientes afectados</div><div class="val">${fmt0(totalClientes)}</div></div>
+          </div>
+
+          <div class="dp-section">
+            <div class="sec-title">Por canal</div>
+            <div class="dp-rows">${htmlCanal || '<div class="dp-row"><span class="k">—</span><span class="v">0</span></div>'}</div>
+          </div>
+
+          <div class="dp-section">
+            <div class="sec-title">Por acción sugerida</div>
+            <div class="dp-rows">${htmlAccion || '<div class="dp-row"><span class="k">—</span><span class="v">0</span></div>'}</div>
+          </div>
+        </div>
+      `;
+
+      if(panelRecoResumen){
+        panelRecoResumen.classList.remove("hidden");
+      }
+    }
+
+    function renderRecoMarkers(data){
+      markersReco.clearLayers();
+
+      data.forEach(r => {
+        const lat = Number(r.lat);
+        const lon = Number(r.lon);
+        if(!isFinite(lat) || !isFinite(lon)) return;
+
+        const m = L.marker([lat, lon], {
+          icon: L.divIcon({
+            className: "icon-reco",
+            html: "⚡",
+            iconSize: [36, 36],
+            iconAnchor: [18, 18]
+          }),
+          zIndexOffset: 2000
+        });
+
+        m.on("click", () => showRecoPanel(r));
+        markersReco.addLayer(m);
+      });
+    }
+
+    function aplicarFiltrosRecomendaciones(){
+      recoDataFiltered = getRecoFiltradas();
+      renderRecoMarkers(recoDataFiltered);
+      renderRecoResumen(recoDataFiltered);
+
+      if(chkReco && chkReco.checked){
+        if(!map.hasLayer(markersReco)) markersReco.addTo(map);
+      }
+    }
+
     async function cargarRecomendaciones(){
       try {
         const res = await fetch("/api/recomendaciones");
-        const data = await res.json();
-        markersReco.clearLayers();
-        data.forEach(r => {
-          const m = L.marker([r.lat, r.lon], {
-            icon: L.divIcon({ className: "icon-reco", html: "⚡", iconSize: [36, 36], iconAnchor: [18, 18] }),
-            zIndexOffset: 2000
-          });
-          m.on("click", () => showRecoPanel(r));
-          markersReco.addLayer(m);
-        });
-        recoLoaded = true;
-        if (chkReco && chkReco.checked){
-          if(!map.hasLayer(markersReco)) markersReco.addTo(map);
+        let data = [];
+        try {
+          data = await res.json();
+        } catch(e){
+          console.error("JSON inválido en recomendaciones", e);
+          return;
         }
+
+        recoDataAll = Array.isArray(data) ? data : [];
+        
+        recoLoaded = true;
+
+        aplicarFiltrosRecomendaciones();
+
       } catch(err){
         console.error("Error cargando recomendaciones:", err);
       }
@@ -6722,10 +6951,33 @@ map.on("moveend", () => {
     if(chkReco) chkReco.addEventListener("change", async () => {
       if(chkReco.checked){
         if(!recoLoaded) await cargarRecomendaciones();
+        aplicarFiltrosRecomendaciones();
         if(!map.hasLayer(markersReco)) markersReco.addTo(map);
+        if(panelRecoResumen) panelRecoResumen.classList.remove("hidden");
       }else{
         if(map.hasLayer(markersReco)) map.removeLayer(markersReco);
+        if(panelReco) panelReco.classList.add("hidden");
+        if(panelRecoResumen) panelRecoResumen.classList.add("hidden");
       }
+    });
+
+    if(selRecoCanal){
+      selRecoCanal.addEventListener("change", () => {
+        if(recoLoaded && chkReco?.checked) aplicarFiltrosRecomendaciones();
+      });
+    }
+
+    if(selRecoAccion){
+      selRecoAccion.addEventListener("change", () => {
+        if(recoLoaded && chkReco?.checked) aplicarFiltrosRecomendaciones();
+      });
+    }
+
+    [selDep, selProv, selDist].forEach(el => {
+      if(!el) return;
+      el.addEventListener("change", () => {
+        if(recoLoaded && chkReco?.checked) aplicarFiltrosRecomendaciones();
+      });
     });
 
     if(chkZonaRural) chkZonaRural.addEventListener("change", fetchZonasBorders);
